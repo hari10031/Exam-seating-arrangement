@@ -155,10 +155,11 @@ router.post('/:id/students/preview', (req, res) => {
     try {
         const { ranges, exclude, include } = req.body;
         const { expandRolls } = require('../models/ExamSession');
+        // ranges can be [{start: "2451-23-733-001", end: "2451-23-733-020"}] or [{start: 101, end: 130}]
         const rolls = expandRolls(ranges || [], exclude || [], include || []);
         res.json({ count: rolls.length, rolls });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(400).json({ error: err.message });
     }
 });
 
@@ -195,7 +196,8 @@ router.post('/:id/allocate', (req, res) => {
             students,
             report,
             mode: session.seating_mode,
-            rooms
+            rooms,
+            allocationMethod: session.allocation_method || 'INTERLEAVED'
         });
 
         // Persist

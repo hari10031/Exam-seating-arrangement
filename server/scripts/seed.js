@@ -70,27 +70,28 @@ function seed() {
     ]);
 
     // Add students with roll number ranges
+    // Uses the new hyphenated format (XXXX-XX-XXX-NNN)
     ExamSessionModel.setStudents(session.id, [
         {
             branchId: createdBranches[0].id,
             subjectId: createdSubjects[0].id,
-            ranges: [{ start: 101, end: 130 }],
-            exclude: [115, 120],
-            include: [199]
+            ranges: [{ start: '2451-23-733-001', end: '2451-23-733-030' }],
+            exclude: ['2451-23-733-015', '2451-23-733-020'],
+            include: ['2451-23-733-099']
         },
         {
             branchId: createdBranches[1].id,
             subjectId: createdSubjects[1].id,
-            ranges: [{ start: 201, end: 225 }],
-            exclude: [210],
+            ranges: [{ start: '2451-23-751-001', end: '2451-23-751-025' }],
+            exclude: ['2451-23-751-010'],
             include: []
         },
         {
             branchId: createdBranches[2].id,
             subjectId: createdSubjects[2].id,
-            ranges: [{ start: 301, end: 320 }],
+            ranges: [{ start: '2451-23-749-001', end: '2451-23-749-020' }],
             exclude: [],
-            include: [350]
+            include: ['2451-23-749-050']
         }
     ]);
 

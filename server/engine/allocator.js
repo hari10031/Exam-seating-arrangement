@@ -322,15 +322,23 @@ function allocateLinearSingle(rooms, students) {
 //  LINEAR DOUBLE MODE ALLOCATION
 // ═══════════════════════════════════════════════════════════════
 //
-//  Takes branches in pairs (2 at a time) and fills benches
-//  contiguously. Seat A gets branch X, seat B gets branch Y.
-//  When one branch of the pair is exhausted, the remaining
-//  students from the other branch sit alone (seat A only).
-//  Then move to the next pair of branches.
+//  Places students in CONTIGUOUS blocks by branch — NOT
+//  interleaved.  Two branch pointers (pA for seat A, pB for
+//  seat B) walk through the sorted branch list:
 //
-//  If there are 4 branches [A, B, C, D], the pairing is
-//  (A,B) then (C,D). If 3 branches [A, B, C], the pairing
-//  is (A,B) then (C,alone).
+//    1. Seat A ← next student from the branch at pointer pA.
+//    2. Seat B ← next student from the branch at pointer pB
+//       (pB always points to a DIFFERENT branch than pA).
+//    3. When the pB branch is exhausted, pB advances to the
+//       next non-empty branch (skipping pA's branch).
+//    4. When the pA branch is exhausted, pA advances forward.
+//       If pB is now ≤ pA, pB advances past pA.
+//    5. If only one branch remains (no valid pB), students
+//       from that branch seat on A only — seat B stays empty.
+//       This guarantees the SAME branch NEVER shares a bench.
+//
+//  Result: large contiguous blocks of the same two branches,
+//  exactly matching the university LINEAR seating layout.
 // ═══════════════════════════════════════════════════════════════
 
 function allocateLinearDouble(rooms, students) {
@@ -340,56 +348,78 @@ function allocateLinearDouble(rooms, students) {
     const branchGroups = groupByBranch(students);
     const branchOrder = Object.keys(branchGroups).sort();
 
+    // Build ordered queues
+    const queues = branchOrder.map(b => ({
+        branch: b,
+        students: [...branchGroups[b]],
+        idx: 0
+    }));
+
+    // Find the first non-exhausted queue at or after index `from`
+    function findActive(from) {
+        for (let i = from; i < queues.length; i++) {
+            if (queues[i].idx < queues[i].students.length) return i;
+        }
+        return -1;
+    }
+
     // Build bench slots across all rooms
     const benchSlots = buildSeatSlots(rooms, 'DOUBLE');
 
     const allocations = [];
     const assigned = new Set();
-    let bi = 0; // bench index
 
-    // Process branches in pairs
-    for (let i = 0; i < branchOrder.length; i += 2) {
-        const branchA = branchOrder[i];
-        const branchB = i + 1 < branchOrder.length ? branchOrder[i + 1] : null;
+    // Two branch pointers — always different branches
+    let pA = findActive(0);
+    let pB = pA >= 0 ? findActive(pA + 1) : -1;
 
-        const queueA = [...branchGroups[branchA]];
-        const queueB = branchB ? [...branchGroups[branchB]] : [];
+    for (const slot of benchSlots) {
+        if (pA < 0) break; // all students placed
 
-        let ai = 0, bii = 0;
+        // ── Seat A: from branch at pA ──────────────────────────
+        const qA = queues[pA];
+        const studentA = qA.students[qA.idx++];
+        assigned.add(studentA.id);
+        allocations.push({
+            roomId: slot.roomId,
+            rowNumber: slot.row,
+            columnNumber: slot.col,
+            seatPosition: 'A',
+            studentId: studentA.id,
+            rollNumber: studentA.roll_number,
+            branchCode: studentA.branch_code,
+            subjectName: studentA.subject_name
+        });
 
-        // Fill benches with paired students from the two branches
-        while (ai < queueA.length || bii < queueB.length) {
-            if (bi >= benchSlots.length) break;
-            const slot = benchSlots[bi++];
+        // ── Seat B: from branch at pB (different branch) ──────
+        if (pB >= 0 && queues[pB].idx < queues[pB].students.length) {
+            const qB = queues[pB];
+            const studentB = qB.students[qB.idx++];
+            assigned.add(studentB.id);
+            allocations.push({
+                roomId: slot.roomId,
+                rowNumber: slot.row,
+                columnNumber: slot.col,
+                seatPosition: 'B',
+                studentId: studentB.id,
+                rollNumber: studentB.roll_number,
+                branchCode: studentB.branch_code,
+                subjectName: studentB.subject_name
+            });
 
-            if (ai < queueA.length) {
-                const studentA = queueA[ai++];
-                assigned.add(studentA.id);
-                allocations.push({
-                    roomId: slot.roomId,
-                    rowNumber: slot.row,
-                    columnNumber: slot.col,
-                    seatPosition: 'A',
-                    studentId: studentA.id,
-                    rollNumber: studentA.roll_number,
-                    branchCode: studentA.branch_code,
-                    subjectName: studentA.subject_name
-                });
+            // If B branch exhausted, advance pB (skip pA's branch)
+            if (qB.idx >= qB.students.length) {
+                pB = findActive(pB + 1);
+                if (pB === pA) pB = findActive(pB + 1);
             }
+        }
 
-            if (bii < queueB.length) {
-                const studentB = queueB[bii++];
-                assigned.add(studentB.id);
-                allocations.push({
-                    roomId: slot.roomId,
-                    rowNumber: slot.row,
-                    columnNumber: slot.col,
-                    seatPosition: 'B',
-                    studentId: studentB.id,
-                    rollNumber: studentB.roll_number,
-                    branchCode: studentB.branch_code,
-                    subjectName: studentB.subject_name
-                });
+        // If A branch exhausted, advance pA
+        if (qA.idx >= qA.students.length) {
+            pA = findActive(pA + 1);
+            // Ensure pB is still after pA and different
+            if (pA >= 0 && (pB < 0 || pB <= pA)) {
+                pB = findActive(pA + 1);
             }
         }
     }

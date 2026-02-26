@@ -132,11 +132,11 @@ export default function SessionDetail() {
     const previewRolls = async (entry) => {
         try {
             const ranges = entry.rangeStart && entry.rangeEnd
-                ? [{ start: Number(entry.rangeStart), end: Number(entry.rangeEnd) }] : [];
+                ? [{ start: entry.rangeStart.trim(), end: entry.rangeEnd.trim() }] : [];
             const exclude = entry.excludeStr
-                ? entry.excludeStr.split(',').map(s => Number(s.trim())).filter(n => !isNaN(n)) : [];
+                ? entry.excludeStr.split(',').map(s => s.trim()).filter(Boolean) : [];
             const include = entry.includeStr
-                ? entry.includeStr.split(',').map(s => Number(s.trim())).filter(n => !isNaN(n)) : [];
+                ? entry.includeStr.split(',').map(s => s.trim()).filter(Boolean) : [];
             const result = await sessionsApi.previewRolls(sessionId, { ranges, exclude, include });
             setRollPreview(result);
         } catch (err) { setError(err.message); }
@@ -149,11 +149,11 @@ export default function SessionDetail() {
                 branchId: Number(e.branchId),
                 subjectId: Number(e.subjectId),
                 ranges: e.rangeStart && e.rangeEnd
-                    ? [{ start: Number(e.rangeStart), end: Number(e.rangeEnd) }] : [],
+                    ? [{ start: e.rangeStart.trim(), end: e.rangeEnd.trim() }] : [],
                 exclude: e.excludeStr
-                    ? e.excludeStr.split(',').map(s => Number(s.trim())).filter(n => !isNaN(n)) : [],
+                    ? e.excludeStr.split(',').map(s => s.trim()).filter(Boolean) : [],
                 include: e.includeStr
-                    ? e.includeStr.split(',').map(s => Number(s.trim())).filter(n => !isNaN(n)) : []
+                    ? e.includeStr.split(',').map(s => s.trim()).filter(Boolean) : []
             }));
             const result = await sessionsApi.setStudents(sessionId, entries);
             setSuccess(`Students saved! Total: ${result.count}`);
@@ -381,15 +381,15 @@ export default function SessionDetail() {
                                 <div className="form-row">
                                     <div className="form-group">
                                         <label>Range Start</label>
-                                        <input type="number" value={entry.rangeStart}
+                                        <input type="text" value={entry.rangeStart}
                                             onChange={e => updateStudentEntry(i, 'rangeStart', e.target.value)}
-                                            placeholder="e.g. 101" />
+                                            placeholder="e.g. 2451-23-733-001 or 101" />
                                     </div>
                                     <div className="form-group">
                                         <label>Range End</label>
-                                        <input type="number" value={entry.rangeEnd}
+                                        <input type="text" value={entry.rangeEnd}
                                             onChange={e => updateStudentEntry(i, 'rangeEnd', e.target.value)}
-                                            placeholder="e.g. 130" />
+                                            placeholder="e.g. 2451-23-733-020 or 130" />
                                     </div>
                                 </div>
                                 <div className="form-row">
@@ -397,13 +397,13 @@ export default function SessionDetail() {
                                         <label>Exclude (comma-separated)</label>
                                         <input value={entry.excludeStr}
                                             onChange={e => updateStudentEntry(i, 'excludeStr', e.target.value)}
-                                            placeholder="e.g. 115, 120" />
+                                            placeholder="e.g. 2451-23-733-005, 2451-23-733-010" />
                                     </div>
                                     <div className="form-group">
                                         <label>Include (extra rolls)</label>
                                         <input value={entry.includeStr}
                                             onChange={e => updateStudentEntry(i, 'includeStr', e.target.value)}
-                                            placeholder="e.g. 199, 200" />
+                                            placeholder="e.g. 2451-23-733-099" />
                                     </div>
                                 </div>
                                 <button className="btn btn-outline btn-sm" onClick={() => previewRolls(entry)}>
