@@ -32,7 +32,8 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         { header: 'Row', key: 'row', width: 8 },
         { header: 'Column', key: 'col', width: 8 },
         { header: 'Seat', key: 'seat', width: 8 },
-        { header: 'Roll Number', key: 'rollNumber', width: 15 },
+        { header: 'Roll Number', key: 'rollNumber', width: 18 },
+        { header: 'Student Name', key: 'studentName', width: 25 },
         { header: 'Branch', key: 'branch', width: 15 },
         { header: 'Subject', key: 'subject', width: 30 }
     ];
@@ -51,13 +52,14 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
             col: a.column_number || a.columnNumber,
             seat: a.seat_position || a.seatPosition,
             rollNumber: a.roll_number || a.rollNumber || '',
+            studentName: a.student_name || a.studentName || '',
             branch: a.branch_code || a.branchCode || '',
             subject: a.subject_name || a.subjectName || ''
         });
     }
 
     // Auto-filter
-    sheet1.autoFilter = { from: 'A1', to: 'G1' };
+    sheet1.autoFilter = { from: 'A1', to: 'H1' };
 
     // ── SHEET 2: Summary Report ─────────────────────────────────
     const sheet2 = workbook.addWorksheet('Summary');
@@ -166,6 +168,120 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         });
 
         summarySheet.autoFilter = { from: 'A1', to: 'F1' };
+    }
+
+    // ── PER-ROOM, PER-BRANCH ATTENDANCE SHEETS (Name, Roll, Signature) ─────
+    // Get allocations grouped by room and then by branch
+    const allocationsByRoomBranch = {};
+    for (const a of allocations) {
+        const roomCode = a.room_code || a.roomCode || 'Unknown';
+        const branchCode = a.branch_code || a.branchCode || 'Unknown';
+        const key = `${roomCode}|||${branchCode}`;
+        if (!allocationsByRoomBranch[key]) {
+            allocationsByRoomBranch[key] = {
+                roomCode,
+                branchCode,
+                allocations: []
+            };
+        }
+        allocationsByRoomBranch[key].allocations.push(a);
+    }
+
+    // Sort keys by room then branch
+    const sortedKeys = Object.keys(allocationsByRoomBranch).sort((a, b) => {
+        const [roomA, branchA] = a.split('|||');
+        const [roomB, branchB] = b.split('|||');
+        if (roomA !== roomB) return roomA.localeCompare(roomB);
+        return branchA.localeCompare(branchB);
+    });
+
+    for (const key of sortedKeys) {
+        const { roomCode, branchCode, allocations: roomBranchAllocations } = allocationsByRoomBranch[key];
+
+        // Sheet name: "RoomCode-Branch" (max 31 chars for Excel)
+        const attendanceSheetName = `${roomCode}-${branchCode}`.substring(0, 31);
+        const attendanceSheet = workbook.addWorksheet(attendanceSheetName);
+
+        // Set columns
+        attendanceSheet.columns = [
+            { header: 'S.No', key: 'sNo', width: 8 },
+            { header: 'Roll Number', key: 'rollNumber', width: 20 },
+            { header: 'Student Name', key: 'studentName', width: 30 },
+            { header: 'Signature', key: 'signature', width: 25 }
+        ];
+
+        // Title row (merge and style)
+        attendanceSheet.insertRow(1, []);
+        attendanceSheet.mergeCells('A1:D1');
+        const titleCell = attendanceSheet.getCell('A1');
+        titleCell.value = `Room: ${roomCode} | Branch: ${branchCode} - Attendance Sheet`;
+        titleCell.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+        titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+        titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+        attendanceSheet.getRow(1).height = 25;
+
+        // Style header row (now row 2)
+        const headerRow = attendanceSheet.getRow(2);
+        headerRow.eachCell(cell => {
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4A4A4A' } };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = {
+                top: { style: 'thin' }, bottom: { style: 'thin' },
+                left: { style: 'thin' }, right: { style: 'thin' }
+            };
+        });
+
+        // Sort allocations by roll number
+        const sortedAllocations = roomBranchAllocations
+            .filter(a => a.roll_number || a.rollNumber)
+            .sort((a, b) => {
+                const rollA = a.roll_number || a.rollNumber || '';
+                const rollB = b.roll_number || b.rollNumber || '';
+                return rollA.localeCompare(rollB);
+            });
+
+        // Add data rows
+        let sNo = 1;
+        for (const alloc of sortedAllocations) {
+            const row = attendanceSheet.addRow({
+                sNo: sNo++,
+                rollNumber: alloc.roll_number || alloc.rollNumber || '',
+                studentName: alloc.student_name || alloc.studentName || '',
+                signature: ''  // Empty signature column
+            });
+
+            // Style data row
+            const bgColor = sNo % 2 === 0 ? 'FFF8F9FA' : 'FFFFFFFF';
+            row.eachCell(cell => {
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgColor } };
+                cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                cell.border = {
+                    top: { style: 'thin' }, bottom: { style: 'thin' },
+                    left: { style: 'thin' }, right: { style: 'thin' }
+                };
+            });
+            // Left-align student name
+            row.getCell(3).alignment = { horizontal: 'left', vertical: 'middle' };
+            row.height = 22;
+        }
+
+        // Footer row with total count
+        const footerRowNum = attendanceSheet.rowCount + 1;
+        attendanceSheet.mergeCells(`A${footerRowNum}:C${footerRowNum}`);
+        const footerCell = attendanceSheet.getCell(`A${footerRowNum}`);
+        footerCell.value = `Total Students: ${sortedAllocations.length}`;
+        footerCell.font = { bold: true };
+        footerCell.alignment = { horizontal: 'right' };
+        footerCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E8E8' } };
+        footerCell.border = {
+            top: { style: 'thin' }, bottom: { style: 'thin' },
+            left: { style: 'thin' }, right: { style: 'thin' }
+        };
+        attendanceSheet.getCell(`D${footerRowNum}`).border = {
+            top: { style: 'thin' }, bottom: { style: 'thin' },
+            left: { style: 'thin' }, right: { style: 'thin' }
+        };
     }
 
     // ── PER-ROOM GRID SHEETS ───────────────────────────────────

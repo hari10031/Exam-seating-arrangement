@@ -39,13 +39,17 @@ const AllocationModel = {
 
     /**
      * Get all allocations for a session, ordered by room → row → col → seat.
+     * Fetches student_name from students table or falls back to student_master.
      */
     getBySession(sessionId) {
         const db = getDb();
         return db.prepare(`
-      SELECT sa.*, r.room_code
+      SELECT sa.*, r.room_code, 
+             COALESCE(st.student_name, sm.student_name) as student_name
       FROM seat_allocations sa
       JOIN rooms r ON r.id = sa.room_id
+      LEFT JOIN students st ON st.id = sa.student_id
+      LEFT JOIN student_master sm ON sm.roll_number = sa.roll_number
       WHERE sa.session_id = ?
       ORDER BY r.room_code, sa.row_number, sa.column_number, sa.seat_position
     `).all(sessionId);

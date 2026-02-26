@@ -10,6 +10,7 @@
         "dev:client": "cd client && npm start",
         "seed": "node server/scripts/seed.js",
         "migrate": "node server/scripts/migrate.js",
+        "import": "node server/scripts/importXlsx.js",
         "test": "jest --config jest.config.js"
     },
     "dependencies": {

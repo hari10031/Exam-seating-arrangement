@@ -40,6 +40,28 @@ function initSchema(database) {
             database.exec("ALTER TABLE exam_sessions ADD COLUMN allocation_method TEXT NOT NULL DEFAULT 'INTERLEAVED'");
         }
     } catch (_) { /* column already exists */ }
+
+    // Migration: add student_name column if missing (for XLSX import)
+    try {
+        const studentCols = database.prepare("PRAGMA table_info(students)").all();
+        if (!studentCols.find(c => c.name === 'student_name')) {
+            database.exec("ALTER TABLE students ADD COLUMN student_name TEXT");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Create student_master table for imported XLSX data
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS student_master (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            roll_number     TEXT NOT NULL UNIQUE,
+            student_name    TEXT,
+            branch_code     TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            source_file     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_student_master_roll ON student_master(roll_number);
+        CREATE INDEX IF NOT EXISTS idx_student_master_branch ON student_master(branch_code);
+    `);
 }
 
 function closeDb() {

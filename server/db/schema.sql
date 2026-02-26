@@ -79,11 +79,12 @@ CREATE TABLE IF NOT EXISTS session_branch_subjects (
 --    Generated from admin-provided ranges + exclusions.
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS students (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
-    branch_id   INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
-    subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
-    roll_number TEXT    NOT NULL,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+    branch_id     INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    subject_id    INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    roll_number   TEXT    NOT NULL,
+    student_name  TEXT,                              -- Student's full name (from XLSX import)
     UNIQUE(session_id, roll_number)
 );
 

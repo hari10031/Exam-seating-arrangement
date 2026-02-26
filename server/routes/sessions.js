@@ -11,6 +11,21 @@ const AllocationModel = require('../models/Allocation');
 const { allocateSeats, validateAllocation, buildRoomWiseSummary } = require('../engine');
 const { generateExcel } = require('../export/excel');
 const { generatePDF } = require('../export/pdf');
+const { importXlsxToSession, generateImportTemplate } = require('../import/xlsx');
+
+// ─── XLSX IMPORT TEMPLATE (must be before :id routes) ────────
+
+// GET /api/sessions/import/template
+router.get('/import/template', async (req, res) => {
+    try {
+        const buffer = await generateImportTemplate();
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename="student-import-template.xlsx"');
+        res.send(buffer);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // ─── SESSION CRUD ────────────────────────────────────────────
 
@@ -321,6 +336,54 @@ router.get('/:id/report', (req, res) => {
         const report = AllocationModel.getReport(Number(req.params.id));
         if (!report) return res.status(404).json({ error: 'No allocation report found' });
         res.json(report);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── XLSX IMPORT ─────────────────────────────────────────────
+
+// POST /api/sessions/:id/students/import
+// Import students from XLSX file (send as base64 in JSON body)
+// Body: { 
+//   fileData: "base64-encoded-xlsx",
+//   createMissingBranches: false,
+//   defaultSubjectId: null,
+//   branchSubjectMap: { "CSE": 1, "CSIT": 2 }  // optional
+// }
+router.post('/:id/students/import', async (req, res) => {
+    try {
+        const sessionId = Number(req.params.id);
+        const session = ExamSessionModel.getById(sessionId);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+
+        const { fileData, createMissingBranches, defaultSubjectId, branchSubjectMap } = req.body;
+
+        if (!fileData) {
+            return res.status(400).json({ error: 'fileData (base64-encoded XLSX) is required' });
+        }
+
+        // Decode base64 to buffer
+        const buffer = Buffer.from(fileData, 'base64');
+
+        const result = await importXlsxToSession(sessionId, buffer, {
+            createMissingBranches: createMissingBranches || false,
+            defaultSubjectId: defaultSubjectId || null,
+            branchSubjectMap: branchSubjectMap || {}
+        });
+
+        // Return updated student count along with import results
+        const students = ExamSessionModel.getStudents(sessionId);
+
+        res.json({
+            success: result.imported > 0,
+            imported: result.imported,
+            skipped: result.skipped,
+            totalInFile: result.totalInFile,
+            totalInSession: students.length,
+            errors: result.errors,
+            createdBranches: result.createdBranches
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
