@@ -25,6 +25,11 @@ const SubjectModel = {
         return db.prepare('SELECT * FROM subjects WHERE subject_code = ?').get(subjectCode);
     },
 
+    getByName(subjectName) {
+        const db = getDb();
+        return db.prepare('SELECT * FROM subjects WHERE UPPER(subject_name) = UPPER(?)').get(subjectName);
+    },
+
     getAll() {
         const db = getDb();
         return db.prepare('SELECT * FROM subjects ORDER BY subject_code').all();

@@ -37,7 +37,7 @@ function initSchema(database) {
     try {
         const cols = database.prepare("PRAGMA table_info(exam_sessions)").all();
         if (!cols.find(c => c.name === 'allocation_method')) {
-            database.exec("ALTER TABLE exam_sessions ADD COLUMN allocation_method TEXT NOT NULL DEFAULT 'INTERLEAVED'");
+            database.exec("ALTER TABLE exam_sessions ADD COLUMN allocation_method TEXT NOT NULL DEFAULT 'LINEAR'");
         }
     } catch (_) { /* column already exists */ }
 
@@ -56,12 +56,40 @@ function initSchema(database) {
             roll_number     TEXT NOT NULL UNIQUE,
             student_name    TEXT,
             branch_code     TEXT,
+            year            INTEGER,
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             source_file     TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_student_master_roll ON student_master(roll_number);
         CREATE INDEX IF NOT EXISTS idx_student_master_branch ON student_master(branch_code);
     `);
+
+    // Migration: add year column to student_master if missing (before creating year index)
+    try {
+        const smCols = database.prepare("PRAGMA table_info(student_master)").all();
+        if (!smCols.find(c => c.name === 'year')) {
+            database.exec("ALTER TABLE student_master ADD COLUMN year INTEGER");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Now safe to create year index
+    database.exec("CREATE INDEX IF NOT EXISTS idx_student_master_year ON student_master(year);");
+
+    // Migration: add year column to exam_sessions if missing
+    try {
+        const smCols = database.prepare("PRAGMA table_info(student_master)").all();
+        if (!smCols.find(c => c.name === 'year')) {
+            database.exec("ALTER TABLE student_master ADD COLUMN year INTEGER");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Migration: add year column to exam_sessions if missing
+    try {
+        const esCols = database.prepare("PRAGMA table_info(exam_sessions)").all();
+        if (!esCols.find(c => c.name === 'year')) {
+            database.exec("ALTER TABLE exam_sessions ADD COLUMN year INTEGER");
+        }
+    } catch (_) { /* column already exists */ }
 }
 
 function closeDb() {

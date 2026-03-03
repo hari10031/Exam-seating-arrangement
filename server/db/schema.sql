@@ -38,6 +38,53 @@ CREATE TABLE IF NOT EXISTS subjects (
 );
 
 -- -------------------------------------------------------
+-- 3a. YEAR → BRANCH → SUBJECT MAPPING (curriculum config)
+--     Maps which subjects each branch has for each year.
+--     Imported from XLSX per year.
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS year_branch_subjects (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    year        INTEGER NOT NULL CHECK (year >= 1 AND year <= 6),  -- e.g. 1, 2, 3, 4
+    branch_id   INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    subject_type TEXT NOT NULL DEFAULT 'REGULAR'
+        CHECK (subject_type IN ('REGULAR','PE','OE')),  -- Professional/Open Elective
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(year, branch_id, subject_id)
+);
+
+-- -------------------------------------------------------
+-- 3b. STUDENT ELECTIVE CHOICES
+--     Maps students to their chosen PE/OE subjects.
+--     Imported from XLSX.
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS student_electives (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    roll_number TEXT    NOT NULL,
+    subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    year        INTEGER NOT NULL,
+    elective_type TEXT NOT NULL CHECK (elective_type IN ('PE','OE')),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(roll_number, subject_id)
+);
+
+-- -------------------------------------------------------
+-- 3c. EXAM TIMETABLE
+--     Maps date+slot → branch → subject for each exam.
+--     Imported from XLSX.
+-- -------------------------------------------------------
+CREATE TABLE IF NOT EXISTS exam_timetable (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    year        INTEGER NOT NULL,
+    branch_id   INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    exam_date   TEXT    NOT NULL,       -- ISO date
+    slot        TEXT,                   -- e.g. "FN" (forenoon), "AN" (afternoon)
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(year, branch_id, exam_date, slot)
+);
+
+-- -------------------------------------------------------
 -- 4. EXAM SESSIONS  (a single sitting / time-slot)
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS exam_sessions (
@@ -46,8 +93,9 @@ CREATE TABLE IF NOT EXISTS exam_sessions (
     exam_date     TEXT    NOT NULL,                 -- ISO date
     start_time    TEXT,                             -- HH:MM
     end_time      TEXT,
+    year          INTEGER,                          -- academic year (1-4)
     seating_mode       TEXT NOT NULL DEFAULT 'SINGLE'       CHECK (seating_mode IN ('SINGLE','DOUBLE')),
-    allocation_method  TEXT NOT NULL DEFAULT 'INTERLEAVED'  CHECK (allocation_method IN ('INTERLEAVED','LINEAR')),
+    allocation_method  TEXT NOT NULL DEFAULT 'LINEAR'       CHECK (allocation_method IN ('INTERLEAVED','LINEAR')),
     status             TEXT NOT NULL DEFAULT 'DRAFT'        CHECK (status IN ('DRAFT','ALLOCATED','LOCKED')),
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -65,6 +113,7 @@ CREATE TABLE IF NOT EXISTS session_rooms (
 -- -------------------------------------------------------
 -- 6. SESSION ↔ BRANCH ↔ SUBJECT mapping
 --    Each branch has exactly ONE subject per session.
+--    Now auto-populated from year_branch_subjects + exam_timetable.
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS session_branch_subjects (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +125,7 @@ CREATE TABLE IF NOT EXISTS session_branch_subjects (
 
 -- -------------------------------------------------------
 -- 7. STUDENTS  (roll-number entries for a session)
---    Generated from admin-provided ranges + exclusions.
+--    Now populated from student_master DB instead of ranges.
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS students (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,3 +175,6 @@ CREATE INDEX IF NOT EXISTS idx_students_session     ON students(session_id);
 CREATE INDEX IF NOT EXISTS idx_students_branch      ON students(session_id, branch_id);
 CREATE INDEX IF NOT EXISTS idx_allocations_session  ON seat_allocations(session_id);
 CREATE INDEX IF NOT EXISTS idx_allocations_room     ON seat_allocations(session_id, room_id);
+CREATE INDEX IF NOT EXISTS idx_ybs_year_branch      ON year_branch_subjects(year, branch_id);
+CREATE INDEX IF NOT EXISTS idx_student_electives_roll ON student_electives(roll_number);
+CREATE INDEX IF NOT EXISTS idx_exam_timetable_date  ON exam_timetable(exam_date, slot);

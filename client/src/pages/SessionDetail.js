@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { sessionsApi, roomsApi, branchesApi, subjectsApi } from '../api';
+import { sessionsApi, roomsApi, branchesApi, subjectsApi, configApi } from '../api';
 import SeatingGrid from '../components/SeatingGrid';
 
 const SUBJECT_COLORS = [
@@ -19,7 +19,6 @@ export default function SessionDetail() {
     const [selectedRoomIds, setSelectedRoomIds] = useState([]);
     const [branchSubjectMappings, setBranchSubjectMappings] = useState([]);
     const [studentEntries, setStudentEntries] = useState([]);
-    const [rollPreview, setRollPreview] = useState(null);
     const [allocResult, setAllocResult] = useState(null);
     const [roomGrids, setRoomGrids] = useState([]);
     const [report, setReport] = useState(null);
@@ -28,36 +27,102 @@ export default function SessionDetail() {
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
 
+    // Multi-year branch-subject picker state
+    const [configuredYears, setConfiguredYears] = useState([]);
+    const [pickerYear, setPickerYear] = useState('');
+    const [pickerBranches, setPickerBranches] = useState([]);
+    const [pickerSubjects, setPickerSubjects] = useState({});   // { branchId: [...subjects] }
+    const [pickerBranchId, setPickerBranchId] = useState('');
+    const [pickerSubjectId, setPickerSubjectId] = useState('');
+    const [dbStudents, setDbStudents] = useState({});            // { "year-branchId": [...students] }
+
     const loadSession = useCallback(async () => {
         try {
             const data = await sessionsApi.getById(sessionId);
             setSession(data);
             setSelectedRoomIds(data.rooms.map(r => r.id));
             setBranchSubjectMappings(data.branchSubjects.map(bs => ({
-                branchId: bs.branch_id, subjectId: bs.subject_id
+                branchId: bs.branch_id, subjectId: bs.subject_id,
+                branchCode: bs.branch_code, subjectName: bs.subject_name,
+                subjectCode: bs.subject_code
             })));
-            // Build student entries from existing data grouped by branch
-            if (data.students.length > 0) {
-                const grouped = {};
-                data.students.forEach(s => {
-                    const key = `${s.branch_id}-${s.subject_id}`;
-                    if (!grouped[key]) grouped[key] = { branchId: s.branch_id, subjectId: s.subject_id, rolls: [] };
-                    grouped[key].rolls.push(s.roll_number);
+            // Group saved students by branch+subject
+            const grouped = {};
+            data.students.forEach(s => {
+                const key = `${s.branch_id}-${s.subject_id}`;
+                if (!grouped[key]) grouped[key] = {
+                    branchId: s.branch_id, subjectId: s.subject_id,
+                    branchCode: s.branch_code || '', subjectName: s.subject_name || '',
+                    rolls: []
+                };
+                grouped[key].rolls.push(s.roll_number);
+            });
+            // Build entries from ALL branch-subject mappings (not just those with saved students)
+            if (data.branchSubjects.length > 0) {
+                const newEntries = data.branchSubjects.map(bs => {
+                    const key = `${bs.branch_id}-${bs.subject_id}`;
+                    const saved = grouped[key];
+                    return {
+                        branchId: bs.branch_id, subjectId: bs.subject_id,
+                        branchCode: bs.branch_code, subjectName: bs.subject_name,
+                        excludeStr: '', includeStr: '',
+                        savedCount: saved ? saved.rolls.length : 0, useDb: true,
+                        year: data.year || ''
+                    };
                 });
-                setStudentEntries(Object.values(grouped).map(g => ({
-                    branchId: g.branchId,
-                    subjectId: g.subjectId,
-                    rangeStart: '',
-                    rangeEnd: '',
-                    excludeStr: '',
-                    includeStr: '',
-                    savedCount: g.rolls.length
-                })));
+                setStudentEntries(newEntries);
+                // Pre-load dbStudents for each branch so Students tab shows counts/warnings
+                const yr = data.year || '';
+                if (yr) {
+                    const uniqueBranches = [...new Set(newEntries.map(e => e.branchId))];
+                    Promise.all(uniqueBranches.map(async (bid) => {
+                        const k = `${yr}-${bid}`;
+                        try {
+                            const studs = await configApi.getStudents({ year: yr, branchId: bid });
+                            return { k, studs };
+                        } catch { return { k, studs: [] }; }
+                    })).then(results => {
+                        const updates = {};
+                        results.forEach(r => { updates[r.k] = r.studs; });
+                        setDbStudents(prev => ({ ...prev, ...updates }));
+                    });
+                }
             }
         } catch (err) {
             setError(err.message);
         }
     }, [sessionId]);
+
+    // Load configured years once
+    useEffect(() => {
+        configApi.getConfiguredYears().then(setConfiguredYears).catch(() => { });
+    }, []);
+
+    // When picker year changes, load branches for that year
+    useEffect(() => {
+        if (!pickerYear) { setPickerBranches([]); setPickerSubjects({}); setPickerBranchId(''); return; }
+        configApi.getBranchesForYear(pickerYear).then(setPickerBranches).catch(() => setPickerBranches([]));
+    }, [pickerYear]);
+
+    // When picker branch changes, load subjects for that year+branch
+    useEffect(() => {
+        if (!pickerYear || !pickerBranchId) return;
+        if (pickerSubjects[pickerBranchId]) return; // already loaded
+        configApi.getYearSubjects(pickerYear, pickerBranchId).then(subjects => {
+            setPickerSubjects(prev => ({ ...prev, [pickerBranchId]: subjects }));
+        }).catch(() => { });
+    }, [pickerYear, pickerBranchId, pickerSubjects]);
+
+    // Load DB students for a branch
+    const loadDbStudentsForBranch = useCallback(async (year, branchId) => {
+        const key = `${year}-${branchId}`;
+        if (dbStudents[key]) return dbStudents[key];
+        try {
+            const data = await configApi.getStudents({ year, branchId });
+            setDbStudents(prev => ({ ...prev, [key]: data }));
+            return data;
+        } catch (err) { console.error(err); return []; }
+    }, [dbStudents]);
 
     useEffect(() => {
         Promise.all([
@@ -88,14 +153,21 @@ export default function SessionDetail() {
         } catch (err) { setError(err.message); }
     };
 
-    const addBranchSubjectMapping = () => {
-        setBranchSubjectMappings([...branchSubjectMappings, { branchId: '', subjectId: '' }]);
-    };
-
-    const updateMapping = (index, field, value) => {
-        const updated = [...branchSubjectMappings];
-        updated[index] = { ...updated[index], [field]: Number(value) };
-        setBranchSubjectMappings(updated);
+    // Add a single subject from the picker dropdown
+    const addSelectedSubject = () => {
+        if (!pickerBranchId || !pickerSubjectId || !currentPickerBranch) return;
+        const subject = currentPickerSubs.find(s => String(s.subject_id) === String(pickerSubjectId));
+        if (!subject) return;
+        const alreadyExists = branchSubjectMappings.some(
+            m => Number(m.branchId) === currentPickerBranch.id && Number(m.subjectId) === subject.subject_id
+        );
+        if (alreadyExists) return;
+        setBranchSubjectMappings(prev => [...prev, {
+            branchId: currentPickerBranch.id, subjectId: subject.subject_id,
+            branchCode: currentPickerBranch.branch_code, subjectName: subject.subject_name,
+            subjectCode: subject.subject_code, year: pickerYear
+        }]);
+        setPickerSubjectId('');
     };
 
     const removeMapping = (index) => {
@@ -107,16 +179,29 @@ export default function SessionDetail() {
         try {
             const valid = branchSubjectMappings.filter(m => m.branchId && m.subjectId);
             await sessionsApi.assignBranchSubjects(sessionId, valid);
-            setSuccess('Branch-Subject mappings saved!');
-            loadSession();
+            setSuccess('Branch-Subject mappings saved! Auto-populating students...');
+            await loadSession();
+            // Auto-populate student entries
+            await autoPopulateStudents(valid);
         } catch (err) { setError(err.message); }
     };
 
-    const addStudentEntry = () => {
-        setStudentEntries([...studentEntries, {
-            branchId: '', subjectId: '', rangeStart: '', rangeEnd: '',
-            excludeStr: '', includeStr: '', savedCount: 0
-        }]);
+    // Auto-populate student entries from branch-subject mappings
+    const autoPopulateStudents = async (mappings) => {
+        const entries = [];
+        for (const m of mappings) {
+            const year = m.year || pickerYear || configuredYears[0];
+            if (year) {
+                try { await loadDbStudentsForBranch(year, m.branchId); } catch (e) { }
+            }
+            entries.push({
+                branchId: m.branchId, subjectId: m.subjectId,
+                branchCode: m.branchCode || '', subjectName: m.subjectName || '',
+                excludeStr: '', includeStr: '',
+                savedCount: 0, useDb: true, year: m.year || year
+            });
+        }
+        setStudentEntries(entries);
     };
 
     const updateStudentEntry = (index, field, value) => {
@@ -125,38 +210,47 @@ export default function SessionDetail() {
         setStudentEntries(updated);
     };
 
-    const removeStudentEntry = (index) => {
-        setStudentEntries(studentEntries.filter((_, i) => i !== index));
-    };
-
-    const previewRolls = async (entry) => {
-        try {
-            const ranges = entry.rangeStart && entry.rangeEnd
-                ? [{ start: entry.rangeStart.trim(), end: entry.rangeEnd.trim() }] : [];
-            const exclude = entry.excludeStr
-                ? entry.excludeStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-            const include = entry.includeStr
-                ? entry.includeStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-            const result = await sessionsApi.previewRolls(sessionId, { ranges, exclude, include });
-            setRollPreview(result);
-        } catch (err) { setError(err.message); }
-    };
-
     const saveStudents = async () => {
         setError(''); setSuccess('');
         try {
-            const entries = studentEntries.filter(e => e.branchId && e.subjectId).map(e => ({
-                branchId: Number(e.branchId),
-                subjectId: Number(e.subjectId),
-                ranges: e.rangeStart && e.rangeEnd
-                    ? [{ start: e.rangeStart.trim(), end: e.rangeEnd.trim() }] : [],
-                exclude: e.excludeStr
-                    ? e.excludeStr.split(',').map(s => s.trim()).filter(Boolean) : [],
-                include: e.includeStr
-                    ? e.includeStr.split(',').map(s => s.trim()).filter(Boolean) : []
-            }));
-            const result = await sessionsApi.setStudents(sessionId, entries);
-            setSuccess(`Students saved! Total: ${result.count}`);
+            const entriesWithRolls = [];
+            const branchCounts = [];
+            const emptyBranches = [];
+            // Fetch students fresh for each unique year-branch combo
+            const fetchedStudents = {};
+            for (const e of studentEntries) {
+                if (!e.branchId || !e.subjectId) continue;
+                const year = e.year || pickerYear || configuredYears[0];
+                const key = `${year}-${e.branchId}`;
+                if (!fetchedStudents[key]) {
+                    try {
+                        fetchedStudents[key] = await configApi.getStudents({ year, branchId: e.branchId });
+                    } catch (fetchErr) {
+                        console.error(`Failed to fetch students for year=${year} branch=${e.branchId}:`, fetchErr);
+                        fetchedStudents[key] = [];
+                    }
+                }
+                const students = fetchedStudents[key] || [];
+                const branchLabel = e.branchCode || `Branch ${e.branchId}`;
+                if (students.length === 0) {
+                    emptyBranches.push(branchLabel);
+                } else {
+                    branchCounts.push(`${branchLabel}: ${students.length}`);
+                }
+                entriesWithRolls.push({
+                    branchId: Number(e.branchId), subjectId: Number(e.subjectId),
+                    rollNumbers: students.map(s => s.roll_number),
+                    exclude: e.excludeStr ? e.excludeStr.split(',').map(s => s.trim()).filter(Boolean) : [],
+                    include: e.includeStr ? e.includeStr.split(',').map(s => s.trim()).filter(Boolean) : []
+                });
+            }
+            const result = await sessionsApi.setStudentsFromDb(sessionId, entriesWithRolls);
+            let msg = `Students saved! Total: ${result.count}`;
+            if (branchCounts.length > 0) msg += ` (${branchCounts.join(', ')})`;
+            if (emptyBranches.length > 0) {
+                setError(`No students found in database for: ${emptyBranches.join(', ')}. Please import student data for these branches.`);
+            }
+            setSuccess(msg);
             loadSession();
         } catch (err) { setError(err.message); }
     };
@@ -219,6 +313,18 @@ export default function SessionDetail() {
         subjectColorMap[s.subject_name] = SUBJECT_COLORS[i % SUBJECT_COLORS.length];
     });
 
+    // Build computed helpers for rendering
+    const currentPickerSubs = pickerBranchId ? (pickerSubjects[pickerBranchId] || []) : [];
+    const currentPickerBranch = pickerBranches.find(b => b.id === Number(pickerBranchId));
+
+    // Group selected mappings by branch for display
+    const selectedByBranch = {};
+    branchSubjectMappings.forEach(m => {
+        const bCode = m.branchCode || allBranches.find(b => b.id === Number(m.branchId))?.branch_code || `Branch ${m.branchId}`;
+        if (!selectedByBranch[bCode]) selectedByBranch[bCode] = [];
+        selectedByBranch[bCode].push(m);
+    });
+
     return (
         <div>
             <div className="page-header">
@@ -268,72 +374,167 @@ export default function SessionDetail() {
                         </div>
                     </div>
 
-                    {/* Branch-Subject Mapping */}
+                    {/* Branch-Subject Mapping — multi-year support */}
                     <div className="card">
                         <h3>Branch → Subject Mapping</h3>
                         <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>
-                            Each branch has exactly one subject for this exam session.
+                            Select a year, then a branch to see available subjects. You can add subjects from multiple years.
                         </p>
-                        {branchSubjectMappings.map((m, i) => (
-                            <div className="form-row" key={i} style={{ marginBottom: 8 }}>
-                                <div className="form-group">
-                                    <select value={m.branchId || ''} onChange={e => updateMapping(i, 'branchId', e.target.value)}>
-                                        <option value="">— Select Branch —</option>
-                                        {allBranches.map(b => (
-                                            <option key={b.id} value={b.id}>{b.branch_code} – {b.branch_name}</option>
-                                        ))}
-                                    </select>
-                                </div>
-                                <div className="form-group">
-                                    <select value={m.subjectId || ''} onChange={e => updateMapping(i, 'subjectId', e.target.value)}>
-                                        <option value="">— Select Subject —</option>
-                                        {allSubjects.map(s => (
-                                            <option key={s.id} value={s.id}>{s.subject_code} – {s.subject_name}</option>
-                                        ))}
-                                    </select>
-                                </div>
-                                <button className="btn btn-danger btn-sm" onClick={() => removeMapping(i)}
-                                    style={{ alignSelf: 'center' }}>✕</button>
+
+                        {/* Year + Branch picker */}
+                        <div className="form-row" style={{ marginBottom: 16 }}>
+                            <div className="form-group">
+                                <label>Year</label>
+                                <select value={pickerYear} onChange={e => { setPickerYear(e.target.value); setPickerBranchId(''); }}>
+                                    <option value="">— Select Year —</option>
+                                    {configuredYears.length > 0
+                                        ? configuredYears.map(y => (
+                                            <option key={y} value={y}>Year {y}</option>
+                                        ))
+                                        : [1, 2, 3, 4].map(y => (
+                                            <option key={y} value={y}>Year {y}</option>
+                                        ))
+                                    }
+                                </select>
                             </div>
-                        ))}
-                        <div className="btn-group">
-                            <button className="btn btn-outline" onClick={addBranchSubjectMapping}>+ Add Mapping</button>
-                            <button className="btn btn-primary" onClick={saveBranchSubjects}>Save Mappings</button>
+                            <div className="form-group">
+                                <label>Branch</label>
+                                <select value={pickerBranchId} onChange={e => setPickerBranchId(e.target.value)} disabled={!pickerYear}>
+                                    <option value="">— Select Branch —</option>
+                                    {pickerBranches.map(b => (
+                                        <option key={b.id} value={b.id}>{b.branch_code} — {b.branch_name}</option>
+                                    ))}
+                                </select>
+                            </div>
                         </div>
-                    </div>
 
-                    {/* Seating Mode */}
-                    <div className="card">
-                        <h3>Seating Mode</h3>
-                        <div className="form-group">
-                            <select value={session.seating_mode}
-                                onChange={async (e) => {
-                                    await sessionsApi.update(sessionId, { seatingMode: e.target.value });
-                                    loadSession();
+                        {/* Show subject dropdown for selected year+branch */}
+                        {pickerBranchId && currentPickerBranch && (
+                            <div style={{
+                                background: '#f8f9fb', borderRadius: 8, padding: 16, marginBottom: 16,
+                                border: '1px solid #e0e0e0'
+                            }}>
+                                <div style={{
+                                    fontWeight: 700, fontSize: 14, color: '#1a73e8', marginBottom: 8,
+                                    borderBottom: '2px solid #1a73e8', paddingBottom: 4
                                 }}>
-                                <option value="SINGLE">SINGLE — 1 student per bench</option>
-                                <option value="DOUBLE">DOUBLE — 2 students per bench (different subjects)</option>
-                            </select>
+                                    Year {pickerYear} — {currentPickerBranch.branch_code} — {currentPickerBranch.branch_name}
+                                    <span style={{ fontWeight: 400, color: '#666', fontSize: 12, marginLeft: 8 }}>
+                                        ({currentPickerSubs.length} subjects)
+                                    </span>
+                                </div>
+                                {currentPickerSubs.length > 0 ? (
+                                    <div className="form-row" style={{ alignItems: 'flex-end' }}>
+                                        <div className="form-group" style={{ flex: 1 }}>
+                                            <label>Subject</label>
+                                            <select value={pickerSubjectId}
+                                                onChange={e => setPickerSubjectId(e.target.value)}>
+                                                <option value="">— Select Subject —</option>
+                                                {currentPickerSubs
+                                                    .filter(s => !branchSubjectMappings.some(
+                                                        m => Number(m.branchId) === currentPickerBranch.id && Number(m.subjectId) === s.subject_id
+                                                    ))
+                                                    .map(s => (
+                                                        <option key={s.subject_id} value={s.subject_id}>
+                                                            {s.subject_name}
+                                                            {s.subject_type !== 'REGULAR' ? ` (${s.subject_type})` : ''}
+                                                        </option>
+                                                    ))
+                                                }
+                                            </select>
+                                        </div>
+                                        <div style={{ marginBottom: 16 }}>
+                                            <button className="btn btn-primary btn-sm" onClick={addSelectedSubject}
+                                                disabled={!pickerSubjectId}>
+                                                + Add
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p style={{ color: '#999', fontSize: 13 }}>No subjects configured for this branch in Year {pickerYear}.</p>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Selected mappings summary */}
+                        {branchSubjectMappings.length > 0 && (
+                            <div style={{
+                                background: '#f0f4ff', borderRadius: 8, padding: 16, marginBottom: 12,
+                                border: '1px solid #c8d6f0'
+                            }}>
+                                <h4 style={{ marginBottom: 8, fontSize: 14 }}>
+                                    Selected Mappings ({branchSubjectMappings.length})
+                                </h4>
+                                {Object.entries(selectedByBranch).map(([bCode, subs]) => (
+                                    <div key={bCode} style={{ marginBottom: 8 }}>
+                                        <strong style={{ color: '#1a73e8', fontSize: 13 }}>{bCode}</strong>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                                            {subs.map((m, i) => (
+                                                <span key={i} style={{
+                                                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                                                    padding: '2px 8px', borderRadius: 4,
+                                                    background: '#e8f5e9', border: '1px solid #a5d6a7',
+                                                    fontSize: 11
+                                                }}>
+                                                    {m.subjectName || m.subjectCode || `Subject ${m.subjectId}`}
+                                                    <span style={{ cursor: 'pointer', color: '#c62828', fontWeight: 700, marginLeft: 2 }}
+                                                        onClick={() => {
+                                                            const idx = branchSubjectMappings.indexOf(m);
+                                                            if (idx !== -1) removeMapping(idx);
+                                                        }}>×</span>
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {branchSubjectMappings.length === 0 && !pickerBranchId && (
+                            <p style={{ color: '#999', fontSize: 13 }}>
+                                No mappings selected yet. Pick a year and branch above to add subjects.
+                            </p>
+                        )}
+
+                        <div className="btn-group" style={{ marginTop: 8 }}>
+                            <button className="btn btn-primary" onClick={saveBranchSubjects}
+                                disabled={branchSubjectMappings.length === 0}>
+                                Save Mappings & Auto-Add Students ({branchSubjectMappings.length})
+                            </button>
                         </div>
                     </div>
 
-                    {/* Allocation Method */}
+                    {/* Seating & Allocation Settings (combined) */}
                     <div className="card">
-                        <h3>Allocation Method</h3>
-                        <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>
-                            <strong>INTERLEAVED:</strong> Mixes subjects/branches for maximum spacing — adjacent seats have different subjects.<br />
-                            <strong>LINEAR:</strong> Contiguous blocks per branch — students from the same branch fill seats sequentially across rooms.
+                        <h3>Seating & Allocation Settings</h3>
+                        <div className="form-row">
+                            <div className="form-group">
+                                <label>Seating Mode</label>
+                                <select value={session.seating_mode}
+                                    onChange={async (e) => {
+                                        await sessionsApi.update(sessionId, { seatingMode: e.target.value });
+                                        loadSession();
+                                    }}>
+                                    <option value="SINGLE">SINGLE — 1 student per bench</option>
+                                    <option value="DOUBLE">DOUBLE — 2 students (different subjects)</option>
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label>Allocation Method</label>
+                                <select value={session.allocation_method || 'INTERLEAVED'}
+                                    onChange={async (e) => {
+                                        await sessionsApi.update(sessionId, { allocationMethod: e.target.value });
+                                        loadSession();
+                                    }}>
+                                    <option value="INTERLEAVED">INTERLEAVED — mix for spacing</option>
+                                    <option value="LINEAR">LINEAR — contiguous blocks</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
+                            <strong>INTERLEAVED:</strong> Adjacent seats have different subjects.{' '}
+                            <strong>LINEAR:</strong> Students from same branch fill seats sequentially.
                         </p>
-                        <div className="form-group">
-                            <select value={session.allocation_method || 'INTERLEAVED'}
-                                onChange={async (e) => {
-                                    await sessionsApi.update(sessionId, { allocationMethod: e.target.value });
-                                    loadSession();
-                                }}>
-                                <option value="INTERLEAVED">INTERLEAVED — mix subjects for spacing</option>
-                                <option value="LINEAR">LINEAR — contiguous blocks per branch</option>
-                            </select>
-                        </div>
                     </div>
                 </div>
             )}
@@ -344,91 +545,78 @@ export default function SessionDetail() {
                     <div className="card">
                         <h3>Student Roll Number Entries</h3>
                         <p style={{ fontSize: 13, color: '#666', marginBottom: 16 }}>
-                            Define roll number ranges per branch. You can exclude specific rolls or add individual ones.
+                            Students are auto-populated from branch-subject mappings. You can exclude or include specific roll numbers below.
                         </p>
 
-                        {studentEntries.map((entry, i) => (
-                            <div key={i} className="card" style={{ background: '#f8f9fb', boxShadow: 'none', padding: 16 }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                    <strong>Entry #{i + 1}</strong>
-                                    {entry.savedCount > 0 && (
-                                        <span className="badge badge-success">{entry.savedCount} students</span>
-                                    )}
-                                    <button className="btn btn-danger btn-sm" onClick={() => removeStudentEntry(i)}>Remove</button>
-                                </div>
-                                <div className="form-row">
-                                    <div className="form-group">
-                                        <label>Branch</label>
-                                        <select value={entry.branchId || ''}
-                                            onChange={e => updateStudentEntry(i, 'branchId', e.target.value)}>
-                                            <option value="">— Branch —</option>
-                                            {allBranches.map(b => (
-                                                <option key={b.id} value={b.id}>{b.branch_code}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <div className="form-group">
-                                        <label>Subject</label>
-                                        <select value={entry.subjectId || ''}
-                                            onChange={e => updateStudentEntry(i, 'subjectId', e.target.value)}>
-                                            <option value="">— Subject —</option>
-                                            {allSubjects.map(s => (
-                                                <option key={s.id} value={s.id}>{s.subject_name}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                </div>
-                                <div className="form-row">
-                                    <div className="form-group">
-                                        <label>Range Start</label>
-                                        <input type="text" value={entry.rangeStart}
-                                            onChange={e => updateStudentEntry(i, 'rangeStart', e.target.value)}
-                                            placeholder="e.g. 2451-23-733-001 or 101" />
-                                    </div>
-                                    <div className="form-group">
-                                        <label>Range End</label>
-                                        <input type="text" value={entry.rangeEnd}
-                                            onChange={e => updateStudentEntry(i, 'rangeEnd', e.target.value)}
-                                            placeholder="e.g. 2451-23-733-020 or 130" />
-                                    </div>
-                                </div>
-                                <div className="form-row">
-                                    <div className="form-group">
-                                        <label>Exclude (comma-separated)</label>
-                                        <input value={entry.excludeStr}
-                                            onChange={e => updateStudentEntry(i, 'excludeStr', e.target.value)}
-                                            placeholder="e.g. 2451-23-733-005, 2451-23-733-010" />
-                                    </div>
-                                    <div className="form-group">
-                                        <label>Include (extra rolls)</label>
-                                        <input value={entry.includeStr}
-                                            onChange={e => updateStudentEntry(i, 'includeStr', e.target.value)}
-                                            placeholder="e.g. 2451-23-733-099" />
-                                    </div>
-                                </div>
-                                <button className="btn btn-outline btn-sm" onClick={() => previewRolls(entry)}>
-                                    Preview Roll List
-                                </button>
-                            </div>
-                        ))}
-
-                        {rollPreview && (
-                            <div className="card" style={{ background: '#fff9c4', boxShadow: 'none' }}>
-                                <strong>Preview: {rollPreview.count} students</strong>
-                                <div className="roll-preview">
-                                    {rollPreview.rolls.map(r => (
-                                        <span key={r} className="roll-chip">{r}</span>
-                                    ))}
-                                </div>
-                                <button className="btn btn-outline btn-sm" style={{ marginTop: 8 }}
-                                    onClick={() => setRollPreview(null)}>Close Preview</button>
+                        {studentEntries.length === 0 && (
+                            <div className="alert alert-warning" style={{ fontSize: 13 }}>
+                                No student entries yet. Go to Configuration tab, add Branch → Subject mappings, and click "Save Mappings & Auto-Add Students".
                             </div>
                         )}
 
-                        <div className="btn-group">
-                            <button className="btn btn-outline" onClick={addStudentEntry}>+ Add Entry</button>
-                            <button className="btn btn-primary" onClick={saveStudents}>Save All Students</button>
-                        </div>
+                        {studentEntries.map((entry, i) => {
+                            const year = entry.year || pickerYear || configuredYears[0];
+                            const key = `${year}-${entry.branchId}`;
+                            const branchStudents = dbStudents[key] || [];
+
+                            return (
+                                <div key={i} className="card" style={{ background: '#f8f9fb', boxShadow: 'none', padding: 16 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                        <div>
+                                            <strong style={{ color: '#1a73e8' }}>
+                                                {entry.branchCode || `Branch ${entry.branchId}`}
+                                            </strong>
+                                            <span style={{ margin: '0 6px', color: '#999' }}>→</span>
+                                            <strong>{entry.subjectName || `Subject ${entry.subjectId}`}</strong>
+                                            {year && <span style={{ fontSize: 11, color: '#888', marginLeft: 8 }}>(Year {year})</span>}
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                            {entry.savedCount > 0 && (
+                                                <span className="badge badge-success">{entry.savedCount} saved</span>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Show DB student count */}
+                                    {branchStudents.length > 0 ? (
+                                        <div style={{ fontSize: 13, color: '#1565c0', marginBottom: 8 }}>
+                                            {branchStudents.length} students in database
+                                            <span style={{ color: '#666' }}>
+                                                {' '}(Rolls: {branchStudents[0]?.roll_number} … {branchStudents[branchStudents.length - 1]?.roll_number})
+                                            </span>
+                                        </div>
+                                    ) : (
+                                        <div style={{ fontSize: 13, color: '#e65100', marginBottom: 8, background: '#fff3e0', padding: '6px 10px', borderRadius: 4 }}>
+                                            ⚠ No students found in database for {entry.branchCode || `Branch ${entry.branchId}`}
+                                            {year ? ` (Year ${year})` : ''}. Import student data for this branch first.
+                                        </div>
+                                    )}
+
+                                    <div className="form-row">
+                                        <div className="form-group">
+                                            <label>Exclude (comma-separated)</label>
+                                            <input value={entry.excludeStr}
+                                                onChange={e => updateStudentEntry(i, 'excludeStr', e.target.value)}
+                                                placeholder="e.g. 2451-23-733-005, 2451-23-733-010" />
+                                        </div>
+                                        <div className="form-group">
+                                            <label>Include (extra rolls)</label>
+                                            <input value={entry.includeStr}
+                                                onChange={e => updateStudentEntry(i, 'includeStr', e.target.value)}
+                                                placeholder="e.g. 2451-23-733-099" />
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+
+                        {studentEntries.length > 0 && (
+                            <div className="btn-group" style={{ marginTop: 8 }}>
+                                <button className="btn btn-primary" onClick={saveStudents}>
+                                    Save All Students ({studentEntries.length} entries)
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     {/* Current student summary */}

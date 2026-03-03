@@ -52,12 +52,12 @@ router.get('/:id', (req, res) => {
 // POST /api/sessions
 router.post('/', (req, res) => {
     try {
-        const { sessionName, examDate, startTime, endTime, seatingMode, allocationMethod } = req.body;
+        const { sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year } = req.body;
         if (!sessionName || !examDate) {
             return res.status(400).json({ error: 'sessionName and examDate are required' });
         }
         const session = ExamSessionModel.create({
-            sessionName, examDate, startTime, endTime, seatingMode, allocationMethod
+            sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year
         });
         res.status(201).json(session);
     } catch (err) {
@@ -147,6 +147,22 @@ router.put('/:id/students', (req, res) => {
             return res.status(400).json({ error: 'entries must be an array' });
         }
         ExamSessionModel.setStudents(Number(req.params.id), entries);
+        const students = ExamSessionModel.getStudents(Number(req.params.id));
+        res.json({ count: students.length, students });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// PUT /api/sessions/:id/students-from-db
+// Body: { entries: [{ branchId, subjectId, rollNumbers: [...], exclude: [], include: [] }] }
+router.put('/:id/students-from-db', (req, res) => {
+    try {
+        const { entries } = req.body;
+        if (!Array.isArray(entries)) {
+            return res.status(400).json({ error: 'entries must be an array' });
+        }
+        ExamSessionModel.setStudentsFromDb(Number(req.params.id), entries);
         const students = ExamSessionModel.getStudents(Number(req.params.id));
         res.json({ count: students.length, students });
     } catch (err) {

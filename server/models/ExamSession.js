@@ -9,11 +9,11 @@ const { getDb } = require('../db/connection');
 const ExamSessionModel = {
     // ─── SESSION CRUD ────────────────────────────────────────────
 
-    create({ sessionName, examDate, startTime, endTime, seatingMode, allocationMethod }) {
+    create({ sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year }) {
         const db = getDb();
         const stmt = db.prepare(`
-      INSERT INTO exam_sessions (session_name, exam_date, start_time, end_time, seating_mode, allocation_method)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO exam_sessions (session_name, exam_date, start_time, end_time, seating_mode, allocation_method, year)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
         const result = stmt.run(
             sessionName,
@@ -21,7 +21,8 @@ const ExamSessionModel = {
             startTime || null,
             endTime || null,
             seatingMode || 'SINGLE',
-            allocationMethod || 'INTERLEAVED'
+            allocationMethod || 'INTERLEAVED',
+            year || null
         );
         return this.getById(result.lastInsertRowid);
     },
@@ -46,7 +47,8 @@ const ExamSessionModel = {
             endTime: 'end_time',
             seatingMode: 'seating_mode',
             allocationMethod: 'allocation_method',
-            status: 'status'
+            status: 'status',
+            year: 'year'
         };
         const sets = [];
         const vals = [];
@@ -142,6 +144,48 @@ const ExamSessionModel = {
                 const rollSet = expandRolls(entry.ranges, entry.exclude, entry.include);
                 for (const roll of rollSet) {
                     ins.run(sessionId, entry.branchId, entry.subjectId, roll);
+                }
+            }
+        });
+        txn();
+    },
+
+    /**
+     * Set students from the student_master DB instead of roll ranges.
+     * @param {number} sessionId
+     * @param {Array<{branchId, subjectId, rollNumbers: string[], exclude: string[]}>} entries
+     */
+    setStudentsFromDb(sessionId, entries) {
+        const db = getDb();
+        const del = db.prepare('DELETE FROM students WHERE session_id = ?');
+        const ins = db.prepare(`
+      INSERT OR IGNORE INTO students (session_id, branch_id, subject_id, roll_number, student_name)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+        // Lookup student names from student_master
+        const lookupName = db.prepare(
+            'SELECT student_name FROM student_master WHERE roll_number = ?'
+        );
+
+        const txn = db.transaction(() => {
+            del.run(sessionId);
+            for (const entry of entries) {
+                const excludeSet = new Set((entry.exclude || []).map(r => String(r).trim()));
+                const rolls = (entry.rollNumbers || []).filter(r => !excludeSet.has(String(r).trim()));
+
+                // Add extra includes
+                if (entry.include && entry.include.length > 0) {
+                    for (const r of entry.include) {
+                        if (!rolls.includes(String(r).trim())) {
+                            rolls.push(String(r).trim());
+                        }
+                    }
+                }
+
+                for (const roll of rolls) {
+                    const master = lookupName.get(roll);
+                    const name = master ? master.student_name : null;
+                    ins.run(sessionId, entry.branchId, entry.subjectId, roll, name);
                 }
             }
         });

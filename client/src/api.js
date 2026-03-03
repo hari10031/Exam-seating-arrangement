@@ -59,6 +59,8 @@ export const sessionsApi = {
     getBranchSubjects: (id) => api(`/sessions/${id}/branch-subjects`),
     setStudents: (id, entries) =>
         api(`/sessions/${id}/students`, { method: 'PUT', body: { entries } }),
+    setStudentsFromDb: (id, entries) =>
+        api(`/sessions/${id}/students-from-db`, { method: 'PUT', body: { entries } }),
     getStudents: (id) => api(`/sessions/${id}/students`),
     previewRolls: (id, data) =>
         api(`/sessions/${id}/students/preview`, { method: 'POST', body: data }),
@@ -68,4 +70,65 @@ export const sessionsApi = {
     getReport: (id) => api(`/sessions/${id}/report`),
     exportExcel: (id) => api(`/sessions/${id}/export/excel`),
     exportPdf: (id) => api(`/sessions/${id}/export/pdf`),
+};
+
+// ── Configuration APIs ───────────────────────────────────────
+
+export const configApi = {
+    // XLSX column detection
+    detectColumns: (fileData) =>
+        api('/config/xlsx/detect-columns', { method: 'POST', body: { fileData } }),
+
+    // Student master CRUD
+    importStudents: (data) =>
+        api('/config/students/import', { method: 'POST', body: data }),
+    getStudents: (params) => {
+        const qs = new URLSearchParams(params).toString();
+        return api(`/config/students?${qs}`);
+    },
+    getStudentBranches: (year) =>
+        api(`/config/students/branches?year=${year}`),
+    getStudentYears: () =>
+        api('/config/students/years'),
+
+    // Year → Branch → Subject mapping
+    importYearSubjects: (data) =>
+        api('/config/year-subjects/import', { method: 'POST', body: data }),
+    setYearSubjects: (year, mappings) =>
+        api(`/config/year-subjects/${year}`, { method: 'PUT', body: { mappings } }),
+    getYearSubjects: (year, branchId) => {
+        let url = `/config/year-subjects/${year}`;
+        if (branchId) url += `?branchId=${branchId}`;
+        return api(url);
+    },
+    getAllYearSubjects: () => api('/config/year-subjects'),
+    deleteYearSubjects: (year) =>
+        api(`/config/year-subjects/${year}`, { method: 'DELETE' }),
+    getConfiguredYears: () => api('/config/years'),
+    getBranchesForYear: (year) => api(`/config/branches-for-year/${year}`),
+
+    // Student electives
+    importElectives: (data) =>
+        api('/config/electives/import', { method: 'POST', body: data }),
+    getElectives: (year, type) => {
+        let url = `/config/electives?year=${year}`;
+        if (type && type !== 'ALL') url += `&type=${type}`;
+        return api(url);
+    },
+
+    // Exam timetable
+    importTimetable: (data) =>
+        api('/config/timetable/import', { method: 'POST', body: data }),
+    getTimetable: (year) => {
+        let url = '/config/timetable';
+        if (year) url += `?year=${year}`;
+        return api(url);
+    },
+    getTimetableByDate: (date, slot) => {
+        let url = `/config/timetable/by-date?date=${date}`;
+        if (slot) url += `&slot=${slot}`;
+        return api(url);
+    },
+    deleteTimetable: (year) =>
+        api(`/config/timetable/${year}`, { method: 'DELETE' }),
 };

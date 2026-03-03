@@ -7,6 +7,7 @@ import SubjectsPage from './pages/SubjectsPage';
 import SessionsPage from './pages/SessionsPage';
 import SessionDetail from './pages/SessionDetail';
 import Dashboard from './pages/Dashboard';
+import ConfigurationPage from './pages/ConfigurationPage';
 
 function App() {
     return (
@@ -15,6 +16,7 @@ function App() {
                 <nav className="sidebar">
                     <h2>Exam Seating</h2>
                     <NavLink to="/" end>Dashboard</NavLink>
+                    <NavLink to="/configuration">Configuration</NavLink>
                     <NavLink to="/rooms">Rooms</NavLink>
                     <NavLink to="/branches">Branches</NavLink>
                     <NavLink to="/subjects">Subjects</NavLink>
@@ -23,6 +25,7 @@ function App() {
                 <main className="main-content">
                     <Routes>
                         <Route path="/" element={<Dashboard />} />
+                        <Route path="/configuration" element={<ConfigurationPage />} />
                         <Route path="/rooms" element={<RoomsPage />} />
                         <Route path="/branches" element={<BranchesPage />} />
                         <Route path="/subjects" element={<SubjectsPage />} />

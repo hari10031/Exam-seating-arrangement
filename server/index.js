@@ -20,15 +20,17 @@ app.use('/api/rooms', require('./routes/rooms'));
 app.use('/api/branches', require('./routes/branches'));
 app.use('/api/subjects', require('./routes/subjects'));
 app.use('/api/sessions', require('./routes/sessions'));
+app.use('/api/config', require('./routes/config'));
 
 // ── SERVE REACT BUILD IN PRODUCTION ──────────────────────────
 const clientBuild = path.resolve(__dirname, '..', 'client', 'build');
 app.use(express.static(clientBuild));
 app.get('*', (req, res) => {
     // Only serve index.html for non-API routes
-    if (!req.path.startsWith('/api')) {
-        res.sendFile(path.join(clientBuild, 'index.html'));
-    }
+    // if (!req.path.startsWith('/api')) {
+    //     res.sendFile(path.join(clientBuild, 'index.html'));
+    // }    
+    res.send({ message: `Working on Port http://localhost:${PORT}  ` })
 });
 
 // ── ERROR HANDLER ────────────────────────────────────────────
@@ -42,7 +44,7 @@ app.listen(PORT, () => {
     console.log(`
   ╔═══════════════════════════════════════════════╗
   ║   EXAM SEATING ARRANGEMENT SYSTEM             ║
-  ║   Server running on http://localhost:${PORT}      ║
+  ║   Server running on http://localhost:${PORT}     ║
   ╚═══════════════════════════════════════════════╝
   `);
 });

@@ -1,0 +1,923 @@
+/**
+ * CONFIGURATION API
+ * =================
+ * Manages all data configuration:
+ *  - Student XLSX import (with column picker)
+ *  - Year → Branch → Subject mapping (from XLSX)
+ *  - Student elective choices (from XLSX)
+ *  - Exam timetable (from XLSX)
+ */
+const express = require('express');
+const router = express.Router();
+const ExcelJS = require('exceljs');
+const { getDb } = require('../db/connection');
+const ConfigurationModel = require('../models/Configuration');
+const BranchModel = require('../models/Branch');
+const SubjectModel = require('../models/Subject');
+
+// ═══════════════════════════════════════════════════════════════
+//  XLSX COLUMN DETECTION — Reads headers for user to pick columns
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/config/xlsx/detect-columns
+ * Body: { fileData: "base64-encoded-xlsx" }
+ * Returns: { sheets: [{ name, headers: [{col, name}], sampleRows: [[...], ...] }] }
+ */
+router.post('/xlsx/detect-columns', async (req, res) => {
+    try {
+        const { fileData } = req.body;
+        if (!fileData) return res.status(400).json({ error: 'fileData (base64) is required' });
+
+        const buffer = Buffer.from(fileData, 'base64');
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+
+        // Known header keywords for smart detection
+        const KNOWN_HEADERS = [
+            'roll', 'htno', 'hall ticket', 'branch', 'name of the student',
+            'student name', 'subject code', 'sub code', 'subject name',
+            'date', 'exam date', 'slot', 'section', 'year', 'sem',
+            's.no', 's.no.', 'sno', 'sl.no'
+        ];
+
+        const sheets = [];
+        for (const worksheet of workbook.worksheets) {
+            const headers = [];
+            const sampleRows = [];
+
+            // Try to find header row in first 20 rows
+            // Strategy: prefer a row that matches known header keywords, else
+            // fall back to first row with 2+ non-empty short cells
+            let headerRowNum = -1;
+            let fallbackRow = -1;
+            for (let r = 1; r <= Math.min(20, worksheet.rowCount); r++) {
+                const row = worksheet.getRow(r);
+                const cells = [];
+                let hasText = false;
+                let knownMatchCount = 0;
+                row.eachCell((cell, colNum) => {
+                    const val = String(cell.value || '').trim();
+                    cells.push({ col: colNum, name: val });
+                    if (val.length > 0 && val.length < 100) hasText = true;
+                    // Check if this cell matches known headers
+                    const lower = val.toLowerCase();
+                    for (const kw of KNOWN_HEADERS) {
+                        if (lower.includes(kw) || lower === kw) {
+                            knownMatchCount++;
+                            break;
+                        }
+                    }
+                });
+                // Prefer row with 2+ known header matches
+                if (knownMatchCount >= 2 && headerRowNum === -1) {
+                    headerRowNum = r;
+                }
+                // Fallback: first row with 2+ non-empty cells
+                if (hasText && cells.length >= 2 && fallbackRow === -1) {
+                    fallbackRow = r;
+                }
+            }
+
+            if (headerRowNum === -1) headerRowNum = fallbackRow !== -1 ? fallbackRow : 1;
+
+            // Extract headers from detected header row
+            const headerRow = worksheet.getRow(headerRowNum);
+            headerRow.eachCell((cell, colNum) => {
+                headers.push({ col: colNum, name: String(cell.value || '').trim() });
+            });
+
+            // Get up to 5 sample data rows after header
+            for (let r = headerRowNum + 1; r <= Math.min(headerRowNum + 5, worksheet.rowCount); r++) {
+                const row = worksheet.getRow(r);
+                const rowData = {};
+                headers.forEach(h => {
+                    rowData[h.col] = String(row.getCell(h.col).value || '').trim();
+                });
+                sampleRows.push(rowData);
+            }
+
+            sheets.push({
+                name: worksheet.name,
+                headerRow: headerRowNum,
+                headers,
+                sampleRows
+            });
+        }
+
+        res.json({ sheets });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  STUDENT MASTER — XLSX Import with column selection
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/config/students/import
+ * Body: {
+ *   fileData: "base64",
+ *   yearMapping: { "22": 4, "23": 3, "24": 2 },   // admission code -> academic year
+ *   columnMapping: { rollNumber: 3, studentName: 5, branch: 7 },
+ *   sheetName: "Sheet1",    // optional, defaults to first/all sheets
+ *   headerRow: 5,           // optional, auto-detected
+ *   createMissingBranches: true
+ * }
+ */
+router.post('/students/import', async (req, res) => {
+    try {
+        const { fileData, yearMapping, year, columnMapping, sheetName, sheetNames, headerRow, createMissingBranches } = req.body;
+        if (!fileData) return res.status(400).json({ error: 'fileData is required' });
+        if (!yearMapping && !year) return res.status(400).json({ error: 'yearMapping or year is required' });
+        if (!columnMapping || !columnMapping.rollNumber) {
+            return res.status(400).json({ error: 'columnMapping with at least rollNumber is required' });
+        }
+
+        const buffer = Buffer.from(fileData, 'base64');
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+
+        const db = getDb();
+        const result = { imported: 0, skipped: 0, errors: [], createdBranches: [], yearBreakdown: {} };
+
+        // Get branch lookup
+        const branches = BranchModel.getAll();
+        const branchLookup = {};
+        for (const b of branches) {
+            branchLookup[b.branch_code.toUpperCase()] = b;
+            branchLookup[b.branch_name.toUpperCase()] = b;
+        }
+
+        const upsert = db.prepare(`
+            INSERT INTO student_master (roll_number, student_name, branch_code, year, source_file)
+            VALUES (?, ?, ?, ?, 'xlsx-import')
+            ON CONFLICT(roll_number) DO UPDATE SET
+                student_name = excluded.student_name,
+                branch_code = excluded.branch_code,
+                year = excluded.year
+        `);
+
+        // Helper: extract admission year code from roll number (e.g. "2451-22-733-001" -> "22")
+        const extractAdmCode = (rollNumber) => {
+            const parts = String(rollNumber || '').trim().split('-');
+            if (parts.length >= 2 && /^\d{2}$/.test(parts[1])) return parts[1];
+            return null;
+        };
+
+        const processSheet = (worksheet, detectedHeaderRow) => {
+            const startRow = detectedHeaderRow || headerRow || 1;
+
+            worksheet.eachRow((row, rowNum) => {
+                if (rowNum <= startRow) return;
+
+                const rollNumber = String(row.getCell(columnMapping.rollNumber).value || '').trim();
+                const studentName = columnMapping.studentName
+                    ? String(row.getCell(columnMapping.studentName).value || '').trim() : null;
+                const branchRaw = columnMapping.branch
+                    ? String(row.getCell(columnMapping.branch).value || '').trim() : null;
+
+                // Validate roll number
+                if (!rollNumber || rollNumber.length < 3 || !/\d/.test(rollNumber)) return;
+                // Skip section headers / title rows (contain words like Sem, Section, Starts, etc.)
+                if (/\b(sem|semester|section|starts|ends|batch|year|from|to)\b/i.test(rollNumber)) return;
+
+                // Determine academic year from yearMapping or fallback to year param
+                let academicYear;
+                if (yearMapping) {
+                    const code = extractAdmCode(rollNumber);
+                    if (!code) return; // silently skip rows without valid roll number format
+                    if (!yearMapping[code]) {
+                        // Skip students whose admission code isn't mapped
+                        result.skipped++;
+                        result.errors.push({ rollNumber, reason: `Admission year code "${code}" not mapped` });
+                        return;
+                    }
+                    academicYear = Number(yearMapping[code]);
+                } else {
+                    academicYear = Number(year);
+                }
+
+                // Handle branch
+                let branchCode = branchRaw;
+                if (branchRaw && createMissingBranches) {
+                    const key = branchRaw.toUpperCase();
+                    if (!branchLookup[key]) {
+                        try {
+                            const newBranch = BranchModel.create({
+                                branchCode: branchRaw,
+                                branchName: branchRaw
+                            });
+                            branchLookup[key] = newBranch;
+                            result.createdBranches.push(branchRaw);
+                        } catch (_) { /* ignore duplicates */ }
+                    }
+                }
+
+                try {
+                    upsert.run(rollNumber, studentName, branchCode, academicYear);
+                    result.imported++;
+                    // Track year breakdown
+                    result.yearBreakdown[academicYear] = (result.yearBreakdown[academicYear] || 0) + 1;
+                } catch (err) {
+                    result.skipped++;
+                    result.errors.push({ rollNumber, reason: err.message });
+                }
+            });
+        };
+
+        const txn = db.transaction(() => {
+            if (sheetNames && sheetNames.length > 0) {
+                for (const sn of sheetNames) {
+                    const ws = workbook.getWorksheet(sn);
+                    if (ws) processSheet(ws, headerRow);
+                }
+            } else if (sheetName) {
+                const ws = workbook.getWorksheet(sheetName);
+                if (!ws) throw new Error(`Sheet "${sheetName}" not found`);
+                processSheet(ws, headerRow);
+            } else {
+                for (const ws of workbook.worksheets) {
+                    processSheet(ws, headerRow);
+                }
+            }
+        });
+        txn();
+
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/students?year=2&branch=CSE  or  ?year=2&branchId=3
+ * Get students from student_master, filtered by year and optionally branch.
+ */
+router.get('/students', (req, res) => {
+    try {
+        const { year, branch, branchId } = req.query;
+        const db = getDb();
+
+        let branchCode = branch;
+        if (!branchCode && branchId) {
+            const row = db.prepare('SELECT branch_code FROM branches WHERE id = ?').get(Number(branchId));
+            branchCode = row ? row.branch_code : null;
+        }
+
+        if (year && branchCode) {
+            res.json(ConfigurationModel.getRollNumbers(Number(year), branchCode));
+        } else if (year) {
+            res.json(ConfigurationModel.getStudentsByYear(Number(year)));
+        } else {
+            // Return summary by year
+            res.json(ConfigurationModel.getStudentYears());
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/students/branches?year=2
+ * Get distinct branches from student_master for a year.
+ */
+router.get('/students/branches', (req, res) => {
+    try {
+        const { year } = req.query;
+        if (!year) return res.status(400).json({ error: 'year is required' });
+        res.json(ConfigurationModel.getStudentBranchesForYear(Number(year)));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/students/years
+ * Get distinct years from student_master.
+ */
+router.get('/students/years', (req, res) => {
+    try {
+        res.json(ConfigurationModel.getStudentYears());
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  YEAR → BRANCH → SUBJECT MAPPING
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/config/year-subjects/import
+ * Import subject mapping from XLSX.
+ * Body: {
+ *   fileData: "base64",
+ *   year: 2,                  // optional if yearColumn is mapped
+ *   columnMapping: { branch: 1, subjectCode: 2, subjectName: 3, year: 4 },
+ *   sheetName: "Sheet1",      // single sheet
+ *   sheetNames: ["S1","S2"],  // OR multiple sheets
+ *   headerRow: 1,
+ *   autoDetectType: true,
+ *   createMissing: true
+ * }
+ */
+router.post('/year-subjects/import', async (req, res) => {
+    try {
+        const { fileData, year, columnMapping, sheetName, sheetNames, headerRow, autoDetectType, createMissing } = req.body;
+        if (!fileData) return res.status(400).json({ error: 'fileData is required' });
+        if (!columnMapping || !columnMapping.branch || (!columnMapping.subjectCode && !columnMapping.subjectName)) {
+            return res.status(400).json({ error: 'columnMapping with branch and at least one of subjectCode or subjectName is required' });
+        }
+        const hasYearColumn = !!columnMapping.year;
+        const hasSubjectCodeCol = !!columnMapping.subjectCode;
+        const hasSubjectNameCol = !!columnMapping.subjectName;
+        if (!hasYearColumn && !year) {
+            return res.status(400).json({ error: 'year is required (or map a Year column)' });
+        }
+
+        const buffer = Buffer.from(fileData, 'base64');
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+
+        const db = getDb();
+        const result = { imported: 0, skipped: 0, errors: [], createdSubjects: [], createdBranches: [], yearBreakdown: {} };
+
+        const branchLookup = {};
+        BranchModel.getAll().forEach(b => {
+            branchLookup[b.branch_code.toUpperCase()] = b;
+        });
+
+        const subjectLookup = {};
+        const subjectNameLookup = {};
+        SubjectModel.getAll().forEach(s => {
+            subjectLookup[s.subject_code.toUpperCase()] = s;
+            if (s.subject_name) subjectNameLookup[s.subject_name.toUpperCase()] = s;
+        });
+
+        // Auto-detect subject type from name
+        const detectType = (subjectName, subjectCode) => {
+            const name = (subjectName || subjectCode || '').toLowerCase();
+            if (name.includes('professional elective') || /\bpe\b/.test(name) || /\bpe[-\s]?\d/.test(name)) return 'PE';
+            if (name.includes('open elective') || /\boe\b/.test(name) || /\boe[-\s]?\d/.test(name)) return 'OE';
+            return 'REGULAR';
+        };
+
+        // Helper: generate a short subject code from a name
+        // e.g. "Automata Languages and computation" -> "AUT-LAN-COM"
+        const generateSubjectCode = (name) => {
+            const words = name.replace(/[^a-zA-Z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 0);
+            const skip = new Set(['and', 'of', 'the', 'in', 'for', 'to', 'a', 'an', 'on', 'with', 'is', 'at', 'by']);
+            const significant = words.filter(w => !skip.has(w.toLowerCase()));
+            if (significant.length === 0) return name.substring(0, 20).toUpperCase().replace(/\s+/g, '-');
+            if (significant.length <= 3) {
+                return significant.map(w => w.substring(0, 4).toUpperCase()).join('-');
+            }
+            return significant.map(w => w.substring(0, 3).toUpperCase()).join('-');
+        };
+
+        // Group mappings by year
+        const mappingsByYear = {};
+
+        const processSheet = (worksheet) => {
+            const startRow = headerRow || 1;
+            worksheet.eachRow((row, rowNum) => {
+                if (rowNum <= startRow) return;
+
+                const branchRaw = String(row.getCell(columnMapping.branch).value || '').trim();
+
+                // Read subject code and name based on what columns are mapped
+                let subjectCode, subjectName;
+                if (hasSubjectCodeCol && hasSubjectNameCol) {
+                    subjectCode = String(row.getCell(columnMapping.subjectCode).value || '').trim();
+                    subjectName = String(row.getCell(columnMapping.subjectName).value || '').trim();
+                } else if (hasSubjectCodeCol) {
+                    subjectCode = String(row.getCell(columnMapping.subjectCode).value || '').trim();
+                    subjectName = subjectCode;
+                } else {
+                    // Only subjectName column mapped - auto-generate code from name
+                    subjectName = String(row.getCell(columnMapping.subjectName).value || '').trim();
+                    subjectCode = subjectName ? generateSubjectCode(subjectName) : '';
+                }
+
+                // Determine year: from column or from request body
+                let rowYear;
+                if (hasYearColumn) {
+                    const yVal = row.getCell(columnMapping.year).value;
+                    rowYear = Number(yVal);
+                    if (!rowYear || rowYear < 1 || rowYear > 6) return; // skip invalid year rows
+                } else {
+                    rowYear = Number(year);
+                }
+
+                // Determine subject type
+                let subjectType;
+                if (autoDetectType) {
+                    subjectType = detectType(subjectName, subjectCode);
+                } else if (columnMapping.subjectType) {
+                    subjectType = String(row.getCell(columnMapping.subjectType).value || '').trim().toUpperCase();
+                } else {
+                    subjectType = 'REGULAR';
+                }
+
+                if (!branchRaw || (!subjectCode && !subjectName)) return;
+
+                // Resolve or create branch
+                let branch = branchLookup[branchRaw.toUpperCase()];
+                if (!branch && createMissing) {
+                    try {
+                        branch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
+                        branchLookup[branchRaw.toUpperCase()] = branch;
+                        result.createdBranches.push(branchRaw);
+                    } catch (_) {
+                        branch = BranchModel.getByCode(branchRaw);
+                    }
+                }
+                if (!branch) {
+                    result.skipped++;
+                    result.errors.push({ subjectCode, reason: `Unknown branch: ${branchRaw}` });
+                    return;
+                }
+
+                // Resolve or create subject — use subject NAME as primary key
+                // This prevents collapsing different subjects that share the same code (e.g. semester)
+                let subject = null;
+                const nameKey = subjectName ? subjectName.toUpperCase() : '';
+                const codeKey = subjectCode ? subjectCode.toUpperCase() : '';
+
+                // 1. Look up by name first (most reliable for deduplication)
+                if (nameKey) {
+                    subject = subjectNameLookup[nameKey];
+                }
+                // 2. If no name mapped or name not found, try by code only when name equals code
+                if (!subject && codeKey && (!hasSubjectNameCol || !nameKey)) {
+                    subject = subjectLookup[codeKey];
+                }
+                // 3. Create if missing
+                if (!subject && createMissing) {
+                    // Generate a unique code from the name to avoid code collisions
+                    let newCode = codeKey && !subjectLookup[codeKey] ? subjectCode : generateSubjectCode(subjectName || subjectCode);
+                    // Ensure code uniqueness by appending counter if needed
+                    let baseCode = newCode;
+                    let counter = 2;
+                    while (subjectLookup[newCode.toUpperCase()]) {
+                        newCode = baseCode + '-' + counter;
+                        counter++;
+                    }
+                    try {
+                        const finalName = subjectName || subjectCode;
+                        subject = SubjectModel.create({ subjectCode: newCode, subjectName: finalName });
+                        subjectLookup[newCode.toUpperCase()] = subject;
+                        if (finalName) subjectNameLookup[finalName.toUpperCase()] = subject;
+                        result.createdSubjects.push(newCode);
+                    } catch (_) {
+                        // Race condition fallback
+                        if (nameKey) subject = SubjectModel.getByName(subjectName);
+                        if (!subject && codeKey) subject = SubjectModel.getByCode(subjectCode);
+                    }
+                }
+                if (!subject) {
+                    result.skipped++;
+                    result.errors.push({ subjectCode: subjectCode || subjectName, reason: `Unknown subject: ${subjectName || subjectCode}` });
+                    return;
+                }
+
+                const validType = ['REGULAR', 'PE', 'OE'].includes(subjectType) ? subjectType : 'REGULAR';
+                if (!mappingsByYear[rowYear]) mappingsByYear[rowYear] = [];
+                mappingsByYear[rowYear].push({ branchId: branch.id, subjectId: subject.id, subjectType: validType });
+                result.imported++;
+                result.yearBreakdown[rowYear] = (result.yearBreakdown[rowYear] || 0) + 1;
+            });
+        };
+
+        if (sheetNames && sheetNames.length > 0) {
+            for (const sn of sheetNames) {
+                const ws = workbook.getWorksheet(sn);
+                if (ws) processSheet(ws);
+            }
+        } else if (sheetName) {
+            const ws = workbook.getWorksheet(sheetName);
+            if (!ws) throw new Error(`Sheet "${sheetName}" not found`);
+            processSheet(ws);
+        } else {
+            for (const ws of workbook.worksheets) {
+                processSheet(ws);
+            }
+        }
+
+        // Save: for each year, clear existing then set new
+        for (const [yr, maps] of Object.entries(mappingsByYear)) {
+            ConfigurationModel.setYearBranchSubjects(Number(yr), maps);
+        }
+
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * PUT /api/config/year-subjects/:year
+ * Manually set subject mappings for a year.
+ * Body: { mappings: [{ branchId, subjectId, subjectType }] }
+ */
+router.put('/year-subjects/:year', (req, res) => {
+    try {
+        const year = Number(req.params.year);
+        const { mappings } = req.body;
+        if (!Array.isArray(mappings)) return res.status(400).json({ error: 'mappings array is required' });
+
+        ConfigurationModel.setYearBranchSubjects(year, mappings);
+        res.json(ConfigurationModel.getYearBranchSubjects(year));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/year-subjects/:year
+ * Get subject mappings for a year, optionally filtered by branchId.
+ */
+router.get('/year-subjects/:year', (req, res) => {
+    try {
+        const year = Number(req.params.year);
+        const branchId = req.query.branchId ? Number(req.query.branchId) : null;
+        res.json(ConfigurationModel.getYearBranchSubjects(year, branchId));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/year-subjects
+ * Get all year-subject mappings.
+ */
+router.get('/year-subjects', (req, res) => {
+    try {
+        res.json(ConfigurationModel.getAllYearBranchSubjects());
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * DELETE /api/config/year-subjects/:year
+ */
+router.delete('/year-subjects/:year', (req, res) => {
+    try {
+        ConfigurationModel.deleteYearMappings(Number(req.params.year));
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/years
+ * Get configured years.
+ */
+router.get('/years', (req, res) => {
+    try {
+        res.json(ConfigurationModel.getConfiguredYears());
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/branches-for-year/:year
+ */
+router.get('/branches-for-year/:year', (req, res) => {
+    try {
+        res.json(ConfigurationModel.getBranchesForYear(Number(req.params.year)));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  STUDENT ELECTIVES
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/config/electives/import
+ * Import student elective choices from XLSX.
+ * Supports multiple PE/OE columns (e.g., PE-1, PE-2, OE-1).
+ * Body: {
+ *   fileData: "base64",
+ *   year: 3,
+ *   columnMapping: {
+ *     rollNumber: 1,
+ *     peSubjectCodes: [2, 3],   // array of PE column indices
+ *     oeSubjectCodes: [4]       // array of OE column indices
+ *   },
+ *   sheetName: "Sheet1",
+ *   sheetNames: ["Sheet1", "Sheet2"],
+ *   headerRow: 1,
+ *   createMissing: true
+ * }
+ */
+router.post('/electives/import', async (req, res) => {
+    try {
+        const { fileData, year, columnMapping, sheetName, sheetNames, headerRow, createMissing } = req.body;
+        if (!fileData) return res.status(400).json({ error: 'fileData is required' });
+        if (!year) return res.status(400).json({ error: 'year is required' });
+        if (!columnMapping || !columnMapping.rollNumber) {
+            return res.status(400).json({ error: 'columnMapping with rollNumber is required' });
+        }
+
+        // Normalize column mapping: support both old and new formats
+        const peColumns = columnMapping.peSubjectCodes
+            || (columnMapping.peSubjectCode ? [columnMapping.peSubjectCode] : []);
+        const oeColumns = columnMapping.oeSubjectCodes
+            || (columnMapping.oeSubjectCode ? [columnMapping.oeSubjectCode] : []);
+        // Legacy single subjectCode with electiveType
+        if (columnMapping.subjectCode && peColumns.length === 0 && oeColumns.length === 0) {
+            // Determine from old electiveType field in body
+            const et = req.body.electiveType || 'PE';
+            if (et === 'PE') peColumns.push(columnMapping.subjectCode);
+            else oeColumns.push(columnMapping.subjectCode);
+        }
+
+        if (peColumns.length === 0 && oeColumns.length === 0) {
+            return res.status(400).json({ error: 'At least one PE or OE subject column is required' });
+        }
+
+        const buffer = Buffer.from(fileData, 'base64');
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+
+        const result = { imported: 0, skipped: 0, errors: [] };
+
+        const subjectLookup = {};
+        SubjectModel.getAll().forEach(s => {
+            subjectLookup[s.subject_code.toUpperCase()] = s;
+        });
+
+        const choices = [];
+        const typesUsed = new Set();
+
+        const resolveSubject = (subjectCode, rollNumber) => {
+            if (!subjectCode) return null;
+            let subject = subjectLookup[subjectCode.toUpperCase()];
+            if (!subject && createMissing) {
+                try {
+                    subject = SubjectModel.create({ subjectCode, subjectName: subjectCode });
+                    subjectLookup[subjectCode.toUpperCase()] = subject;
+                } catch (_) {
+                    subject = SubjectModel.getByCode(subjectCode);
+                }
+            }
+            if (!subject) {
+                result.skipped++;
+                result.errors.push({ rollNumber, reason: `Unknown subject: ${subjectCode}` });
+            }
+            return subject;
+        };
+
+        const processSheet = (worksheet) => {
+            const startRow = headerRow || 1;
+            worksheet.eachRow((row, rowNum) => {
+                if (rowNum <= startRow) return;
+
+                const rollNumber = String(row.getCell(columnMapping.rollNumber).value || '').trim();
+                if (!rollNumber || !/\d/.test(rollNumber)) return;
+                // Skip section headers
+                if (/\b(sem|semester|section|starts|ends|batch)\b/i.test(rollNumber)) return;
+
+                // Process PE columns
+                for (const colIdx of peColumns) {
+                    const code = String(row.getCell(colIdx).value || '').trim();
+                    if (!code) continue;
+                    const sub = resolveSubject(code, rollNumber);
+                    if (sub) {
+                        choices.push({ rollNumber, subjectId: sub.id, year: Number(year), electiveType: 'PE' });
+                        result.imported++;
+                        typesUsed.add('PE');
+                    }
+                }
+
+                // Process OE columns
+                for (const colIdx of oeColumns) {
+                    const code = String(row.getCell(colIdx).value || '').trim();
+                    if (!code) continue;
+                    const sub = resolveSubject(code, rollNumber);
+                    if (sub) {
+                        choices.push({ rollNumber, subjectId: sub.id, year: Number(year), electiveType: 'OE' });
+                        result.imported++;
+                        typesUsed.add('OE');
+                    }
+                }
+            });
+        };
+
+        if (sheetNames && sheetNames.length > 0) {
+            for (const sn of sheetNames) {
+                const ws = workbook.getWorksheet(sn);
+                if (ws) processSheet(ws);
+            }
+        } else if (sheetName) {
+            const ws = workbook.getWorksheet(sheetName);
+            if (!ws) throw new Error(`Sheet "${sheetName}" not found`);
+            processSheet(ws);
+        } else {
+            for (const ws of workbook.worksheets) {
+                processSheet(ws);
+            }
+        }
+
+        if (choices.length > 0) {
+            // Clear existing electives for types being imported
+            for (const t of typesUsed) {
+                ConfigurationModel.clearElectives(Number(year), t);
+            }
+            ConfigurationModel.setStudentElectives(choices);
+        }
+
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/electives?year=3&type=PE
+ */
+router.get('/electives', (req, res) => {
+    try {
+        const { year, type } = req.query;
+        if (!year) return res.status(400).json({ error: 'year is required' });
+        if (!type || type === 'ALL') {
+            res.json(ConfigurationModel.getElectivesByYear(Number(year)));
+        } else {
+            res.json(ConfigurationModel.getElectivesByYearType(Number(year), type));
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  EXAM TIMETABLE
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/config/timetable/import
+ * Import exam timetable from XLSX.
+ * Body: {
+ *   fileData: "base64",
+ *   year: 2,
+ *   columnMapping: { branch: 1, subjectCode: 2, examDate: 3, slot: 4 },
+ *   sheetName: "Sheet1",
+ *   headerRow: 1,
+ *   createMissing: true
+ * }
+ */
+router.post('/timetable/import', async (req, res) => {
+    try {
+        const { fileData, year, columnMapping, sheetName, headerRow, createMissing } = req.body;
+        if (!fileData) return res.status(400).json({ error: 'fileData is required' });
+        if (!year) return res.status(400).json({ error: 'year is required' });
+        if (!columnMapping || !columnMapping.branch || !columnMapping.subjectCode || !columnMapping.examDate) {
+            return res.status(400).json({ error: 'columnMapping with branch, subjectCode, examDate is required' });
+        }
+
+        const buffer = Buffer.from(fileData, 'base64');
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+
+        const result = { imported: 0, skipped: 0, errors: [] };
+
+        const branchLookup = {};
+        BranchModel.getAll().forEach(b => { branchLookup[b.branch_code.toUpperCase()] = b; });
+        const subjectLookup = {};
+        SubjectModel.getAll().forEach(s => { subjectLookup[s.subject_code.toUpperCase()] = s; });
+
+        const entries = [];
+
+        const processSheet = (worksheet) => {
+            const startRow = headerRow || 1;
+            worksheet.eachRow((row, rowNum) => {
+                if (rowNum <= startRow) return;
+
+                const branchRaw = String(row.getCell(columnMapping.branch).value || '').trim();
+                const subjectCode = String(row.getCell(columnMapping.subjectCode).value || '').trim();
+                let examDate = row.getCell(columnMapping.examDate).value;
+                const slot = columnMapping.slot
+                    ? String(row.getCell(columnMapping.slot).value || '').trim() : null;
+
+                if (!branchRaw || !subjectCode || !examDate) return;
+
+                // Handle date formats
+                if (examDate instanceof Date) {
+                    examDate = examDate.toISOString().split('T')[0];
+                } else {
+                    examDate = String(examDate).trim();
+                }
+
+                // Resolve branch
+                let branch = branchLookup[branchRaw.toUpperCase()];
+                if (!branch && createMissing) {
+                    try {
+                        branch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
+                        branchLookup[branchRaw.toUpperCase()] = branch;
+                    } catch (_) {
+                        branch = BranchModel.getByCode(branchRaw);
+                    }
+                }
+                if (!branch) {
+                    result.skipped++;
+                    result.errors.push({ subjectCode, reason: `Unknown branch: ${branchRaw}` });
+                    return;
+                }
+
+                // Resolve subject
+                let subject = subjectLookup[subjectCode.toUpperCase()];
+                if (!subject && createMissing) {
+                    try {
+                        subject = SubjectModel.create({ subjectCode, subjectName: subjectCode });
+                        subjectLookup[subjectCode.toUpperCase()] = subject;
+                    } catch (_) {
+                        subject = SubjectModel.getByCode(subjectCode);
+                    }
+                }
+                if (!subject) {
+                    result.skipped++;
+                    result.errors.push({ subjectCode, reason: `Unknown subject: ${subjectCode}` });
+                    return;
+                }
+
+                entries.push({
+                    year: Number(year),
+                    branchId: branch.id,
+                    subjectId: subject.id,
+                    examDate,
+                    slot
+                });
+                result.imported++;
+            });
+        };
+
+        if (sheetName) {
+            const ws = workbook.getWorksheet(sheetName);
+            if (!ws) throw new Error(`Sheet "${sheetName}" not found`);
+            processSheet(ws);
+        } else {
+            for (const ws of workbook.worksheets) {
+                processSheet(ws);
+            }
+        }
+
+        if (entries.length > 0) {
+            ConfigurationModel.replaceExamTimetable(Number(year), entries);
+        }
+
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/timetable?year=2
+ */
+router.get('/timetable', (req, res) => {
+    try {
+        const { year } = req.query;
+        if (year) {
+            res.json(ConfigurationModel.getExamTimetableByYear(Number(year)));
+        } else {
+            res.json(ConfigurationModel.getAllExamTimetable());
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/timetable/by-date?date=2026-01-15&slot=FN
+ */
+router.get('/timetable/by-date', (req, res) => {
+    try {
+        const { date, slot } = req.query;
+        if (!date) return res.status(400).json({ error: 'date is required' });
+        res.json(ConfigurationModel.getExamTimetableByDate(date, slot || null));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * DELETE /api/config/timetable/:year
+ */
+router.delete('/timetable/:year', (req, res) => {
+    try {
+        ConfigurationModel.deleteExamTimetable(Number(req.params.year));
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+module.exports = router;
