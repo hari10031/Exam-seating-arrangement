@@ -253,11 +253,19 @@ router.post('/students/import', async (req, res) => {
 
 /**
  * GET /api/config/students?year=2&branch=CSE  or  ?year=2&branchId=3
+ *   or  ?year=2&subjectId=5  (for elective students only)
  * Get students from student_master, filtered by year and optionally branch.
+ * When subjectId is provided, returns only students who chose that elective.
  */
 router.get('/students', (req, res) => {
     try {
-        const { year, branch, branchId } = req.query;
+        const { year, branch, branchId, subjectId } = req.query;
+
+        // If subjectId provided, return only students who chose that elective
+        if (year && subjectId) {
+            res.json(ConfigurationModel.getRollNumbersForElective(Number(year), Number(subjectId)));
+            return;
+        }
         const db = getDb();
 
         let branchCode = branch;
@@ -351,9 +359,25 @@ router.post('/year-subjects/import', async (req, res) => {
 
         const subjectLookup = {};
         const subjectNameLookup = {};
+        const subjectNormalizedLookup = {};  // normalized code (strip dots/spaces/hyphens)
+        const subjectNormalizedNameLookup = {};  // normalized name (PE/OE abbreviations)
+        const normalizeCode = (code) => code.replace(/[.\s\-_]/g, '').toUpperCase();
+        const normalizeName = (name) => {
+            return name
+                .replace(/professional\s+elective/gi, 'PE')
+                .replace(/open\s+elective/gi, 'OE')
+                .replace(/[^a-zA-Z0-9\s]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toUpperCase();
+        };
         SubjectModel.getAll().forEach(s => {
             subjectLookup[s.subject_code.toUpperCase()] = s;
-            if (s.subject_name) subjectNameLookup[s.subject_name.toUpperCase()] = s;
+            subjectNormalizedLookup[normalizeCode(s.subject_code)] = s;
+            if (s.subject_name) {
+                subjectNameLookup[s.subject_name.toUpperCase()] = s;
+                subjectNormalizedNameLookup[normalizeName(s.subject_name)] = s;
+            }
         });
 
         // Auto-detect subject type from name
@@ -446,15 +470,23 @@ router.post('/year-subjects/import', async (req, res) => {
                 const nameKey = subjectName ? subjectName.toUpperCase() : '';
                 const codeKey = subjectCode ? subjectCode.toUpperCase() : '';
 
-                // 1. Look up by name first (most reliable for deduplication)
+                // 1. Look up by exact name first (most reliable for deduplication)
                 if (nameKey) {
                     subject = subjectNameLookup[nameKey];
                 }
-                // 2. If no name mapped or name not found, try by code only when name equals code
-                if (!subject && codeKey && (!hasSubjectNameCol || !nameKey)) {
+                // 2. Try exact code match
+                if (!subject && codeKey) {
                     subject = subjectLookup[codeKey];
                 }
-                // 3. Create if missing
+                // 3. Try normalized code match (strip dots, spaces, hyphens)
+                if (!subject && codeKey) {
+                    subject = subjectNormalizedLookup[normalizeCode(codeKey)];
+                }
+                // 4. Try normalized name match (PE/OE abbreviations, strip special chars)
+                if (!subject && nameKey) {
+                    subject = subjectNormalizedNameLookup[normalizeName(subjectName)];
+                }
+                // 5. Create if missing
                 if (!subject && createMissing) {
                     // Generate a unique code from the name to avoid code collisions
                     let newCode = codeKey && !subjectLookup[codeKey] ? subjectCode : generateSubjectCode(subjectName || subjectCode);
@@ -469,7 +501,11 @@ router.post('/year-subjects/import', async (req, res) => {
                         const finalName = subjectName || subjectCode;
                         subject = SubjectModel.create({ subjectCode: newCode, subjectName: finalName });
                         subjectLookup[newCode.toUpperCase()] = subject;
-                        if (finalName) subjectNameLookup[finalName.toUpperCase()] = subject;
+                        subjectNormalizedLookup[normalizeCode(newCode)] = subject;
+                        if (finalName) {
+                            subjectNameLookup[finalName.toUpperCase()] = subject;
+                            subjectNormalizedNameLookup[normalizeName(finalName)] = subject;
+                        }
                         result.createdSubjects.push(newCode);
                     } catch (_) {
                         // Race condition fallback
@@ -792,7 +828,27 @@ router.post('/timetable/import', async (req, res) => {
         const branchLookup = {};
         BranchModel.getAll().forEach(b => { branchLookup[b.branch_code.toUpperCase()] = b; });
         const subjectLookup = {};
-        SubjectModel.getAll().forEach(s => { subjectLookup[s.subject_code.toUpperCase()] = s; });
+        const subjectNameLookup = {};
+        const subjectNormalizedLookup = {};
+        const subjectNormalizedNameLookup = {};
+        const normalizeCode = (code) => code.replace(/[.\s\-_]/g, '').toUpperCase();
+        const normalizeName = (name) => {
+            return name
+                .replace(/professional\s+elective/gi, 'PE')
+                .replace(/open\s+elective/gi, 'OE')
+                .replace(/[^a-zA-Z0-9\s]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toUpperCase();
+        };
+        SubjectModel.getAll().forEach(s => {
+            subjectLookup[s.subject_code.toUpperCase()] = s;
+            subjectNormalizedLookup[normalizeCode(s.subject_code)] = s;
+            if (s.subject_name) {
+                subjectNameLookup[s.subject_name.toUpperCase()] = s;
+                subjectNormalizedNameLookup[normalizeName(s.subject_name)] = s;
+            }
+        });
 
         const entries = [];
 
@@ -806,8 +862,12 @@ router.post('/timetable/import', async (req, res) => {
                 let examDate = row.getCell(columnMapping.examDate).value;
                 const slot = columnMapping.slot
                     ? String(row.getCell(columnMapping.slot).value || '').trim() : null;
+                const timeSlot = columnMapping.time
+                    ? String(row.getCell(columnMapping.time).value || '').trim() : null;
 
                 if (!branchRaw || !subjectCode || !examDate) return;
+                // Skip placeholder/empty subjects like \"-\"
+                if (subjectCode === '-' || subjectCode === '\u2014') return;
 
                 // Handle date formats
                 if (examDate instanceof Date) {
@@ -832,8 +892,11 @@ router.post('/timetable/import', async (req, res) => {
                     return;
                 }
 
-                // Resolve subject
-                let subject = subjectLookup[subjectCode.toUpperCase()];
+                // Resolve subject — try exact code, then normalized code (strip dots/spaces/hyphens), then by name, then normalized name
+                let subject = subjectLookup[subjectCode.toUpperCase()]
+                    || subjectNormalizedLookup[normalizeCode(subjectCode)]
+                    || subjectNameLookup[subjectCode.toUpperCase()]
+                    || subjectNormalizedNameLookup[normalizeName(subjectCode)];
                 if (!subject && createMissing) {
                     try {
                         subject = SubjectModel.create({ subjectCode, subjectName: subjectCode });
@@ -853,7 +916,8 @@ router.post('/timetable/import', async (req, res) => {
                     branchId: branch.id,
                     subjectId: subject.id,
                     examDate,
-                    slot
+                    slot,
+                    timeSlot
                 });
                 result.imported++;
             });
@@ -890,6 +954,45 @@ router.get('/timetable', (req, res) => {
         } else {
             res.json(ConfigurationModel.getAllExamTimetable());
         }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/timetable/dates?year=2
+ * Get unique exam dates from timetable.
+ */
+router.get('/timetable/dates', (req, res) => {
+    try {
+        const { year } = req.query;
+        res.json(ConfigurationModel.getExamDates(year ? Number(year) : null));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/timetable/slots?date=2026-01-15&year=2
+ * Get unique slots for a given date.
+ */
+router.get('/timetable/slots', (req, res) => {
+    try {
+        const { date, year } = req.query;
+        if (!date) return res.status(400).json({ error: 'date is required' });
+        res.json(ConfigurationModel.getSlotsForDate(date, year ? Number(year) : null));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/timetable/years
+ * Get unique years from timetable.
+ */
+router.get('/timetable/years', (req, res) => {
+    try {
+        res.json(ConfigurationModel.getTimetableYears());
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

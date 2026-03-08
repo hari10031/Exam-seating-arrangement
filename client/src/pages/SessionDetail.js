@@ -44,7 +44,8 @@ export default function SessionDetail() {
             setBranchSubjectMappings(data.branchSubjects.map(bs => ({
                 branchId: bs.branch_id, subjectId: bs.subject_id,
                 branchCode: bs.branch_code, subjectName: bs.subject_name,
-                subjectCode: bs.subject_code
+                subjectCode: bs.subject_code, subjectType: bs.subject_type,
+                year: data.year
             })));
             // Group saved students by branch+subject
             const grouped = {};
@@ -65,20 +66,24 @@ export default function SessionDetail() {
                     return {
                         branchId: bs.branch_id, subjectId: bs.subject_id,
                         branchCode: bs.branch_code, subjectName: bs.subject_name,
+                        subjectType: bs.subject_type,
                         excludeStr: '', includeStr: '',
                         savedCount: saved ? saved.rolls.length : 0, useDb: true,
                         year: data.year || ''
                     };
                 });
                 setStudentEntries(newEntries);
-                // Pre-load dbStudents for each branch so Students tab shows counts/warnings
+                // Pre-load dbStudents for each entry so Students tab shows counts/warnings
                 const yr = data.year || '';
                 if (yr) {
-                    const uniqueBranches = [...new Set(newEntries.map(e => e.branchId))];
-                    Promise.all(uniqueBranches.map(async (bid) => {
-                        const k = `${yr}-${bid}`;
+                    Promise.all(newEntries.map(async (e) => {
+                        const isElective = e.subjectType === 'PE' || e.subjectType === 'OE';
+                        const k = isElective ? `${yr}-sub-${e.subjectId}` : `${yr}-${e.branchId}`;
                         try {
-                            const studs = await configApi.getStudents({ year: yr, branchId: bid });
+                            const params = isElective
+                                ? { year: yr, subjectId: e.subjectId }
+                                : { year: yr, branchId: e.branchId };
+                            const studs = await configApi.getStudents(params);
                             return { k, studs };
                         } catch { return { k, studs: [] }; }
                     })).then(results => {
@@ -92,6 +97,72 @@ export default function SessionDetail() {
             setError(err.message);
         }
     }, [sessionId]);
+
+    // State for timetable auto-fetched mappings
+    const [timetableMappings, setTimetableMappings] = useState([]);
+    const [timetableLoaded, setTimetableLoaded] = useState(false);
+
+    // Auto-fetch branch-subject mappings from timetable when session has date+slot+year
+    useEffect(() => {
+        if (!session || !session.exam_date || !session.year) return;
+        // Only auto-fetch if no branch-subject mappings are saved yet
+        if (session.branchSubjects && session.branchSubjects.length > 0) {
+            setTimetableLoaded(true);
+            return;
+        }
+        configApi.getTimetableByDate(session.exam_date, session.slot || null)
+            .then(async (entries) => {
+                // Filter entries for this session's year
+                const yearEntries = entries.filter(e => e.year === session.year);
+                const mappings = yearEntries.map(e => ({
+                    branchId: e.branch_id,
+                    subjectId: e.subject_id,
+                    branchCode: e.branch_code,
+                    subjectName: e.subject_name,
+                    subjectCode: e.subject_code,
+                    year: e.year,
+                    subjectType: e.subject_type
+                }));
+                setTimetableMappings(mappings);
+                if (mappings.length > 0) {
+                    setBranchSubjectMappings(mappings);
+                    // Auto-save branch-subject mappings
+                    try {
+                        await sessionsApi.assignBranchSubjects(sessionId, mappings);
+                        // Auto-populate students for each mapping
+                        // For elective subjects (PE/OE), use subjectId to get only students who chose that elective
+                        const studentEntries = [];
+                        for (const m of mappings) {
+                            try {
+                                const isElective = m.subjectType === 'PE' || m.subjectType === 'OE';
+                                const params = isElective
+                                    ? { year: m.year, subjectId: m.subjectId }
+                                    : { year: m.year, branchId: m.branchId };
+                                const students = await configApi.getStudents(params);
+                                if (students.length > 0) {
+                                    studentEntries.push({
+                                        branchId: Number(m.branchId),
+                                        subjectId: Number(m.subjectId),
+                                        rollNumbers: students.map(s => s.roll_number),
+                                        exclude: [],
+                                        include: []
+                                    });
+                                }
+                            } catch (e) { /* ignore individual fetch errors */ }
+                        }
+                        if (studentEntries.length > 0) {
+                            await sessionsApi.setStudentsFromDb(sessionId, studentEntries);
+                        }
+                        await loadSession();
+                    } catch (e) {
+                        console.error('Auto-save mappings failed:', e);
+                    }
+                }
+                setTimetableLoaded(true);
+            })
+            .catch(() => setTimetableLoaded(true));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [session?.exam_date, session?.slot, session?.year, session?.branchSubjects?.length]);
 
     // Load configured years once
     useEffect(() => {
@@ -190,13 +261,23 @@ export default function SessionDetail() {
     const autoPopulateStudents = async (mappings) => {
         const entries = [];
         for (const m of mappings) {
-            const year = m.year || pickerYear || configuredYears[0];
+            const year = m.year || session?.year || pickerYear || configuredYears[0];
             if (year) {
-                try { await loadDbStudentsForBranch(year, m.branchId); } catch (e) { }
+                const isElective = m.subjectType === 'PE' || m.subjectType === 'OE';
+                try {
+                    if (isElective) {
+                        const k = `${year}-sub-${m.subjectId}`;
+                        const studs = await configApi.getStudents({ year, subjectId: m.subjectId });
+                        setDbStudents(prev => ({ ...prev, [k]: studs }));
+                    } else {
+                        await loadDbStudentsForBranch(year, m.branchId);
+                    }
+                } catch (e) { }
             }
             entries.push({
                 branchId: m.branchId, subjectId: m.subjectId,
                 branchCode: m.branchCode || '', subjectName: m.subjectName || '',
+                subjectType: m.subjectType || '',
                 excludeStr: '', includeStr: '',
                 savedCount: 0, useDb: true, year: m.year || year
             });
@@ -216,17 +297,21 @@ export default function SessionDetail() {
             const entriesWithRolls = [];
             const branchCounts = [];
             const emptyBranches = [];
-            // Fetch students fresh for each unique year-branch combo
+            // Fetch students fresh for each unique year-branch/subject combo
             const fetchedStudents = {};
             for (const e of studentEntries) {
                 if (!e.branchId || !e.subjectId) continue;
-                const year = e.year || pickerYear || configuredYears[0];
-                const key = `${year}-${e.branchId}`;
+                const year = e.year || session?.year || pickerYear || configuredYears[0];
+                const isElective = e.subjectType === 'PE' || e.subjectType === 'OE';
+                const key = isElective ? `${year}-sub-${e.subjectId}` : `${year}-${e.branchId}`;
                 if (!fetchedStudents[key]) {
                     try {
-                        fetchedStudents[key] = await configApi.getStudents({ year, branchId: e.branchId });
+                        const params = isElective
+                            ? { year, subjectId: e.subjectId }
+                            : { year, branchId: e.branchId };
+                        fetchedStudents[key] = await configApi.getStudents(params);
                     } catch (fetchErr) {
-                        console.error(`Failed to fetch students for year=${year} branch=${e.branchId}:`, fetchErr);
+                        console.error(`Failed to fetch students for year=${year}:`, fetchErr);
                         fetchedStudents[key] = [];
                     }
                 }
@@ -258,6 +343,29 @@ export default function SessionDetail() {
     const runAllocation = async () => {
         setError(''); setSuccess('');
         try {
+            // Check for duplicate/single subject in DOUBLE mode
+            if (session && session.seating_mode === 'DOUBLE' && branchSubjectMappings.length > 0) {
+                const uniqueSubjects = [...new Set(branchSubjectMappings.map(m => m.subjectId))];
+                if (uniqueSubjects.length < 2) {
+                    const confirmed = window.confirm(
+                        'Double arrangement is not possible with the same subject. Would you like to change to SINGLE mode?'
+                    );
+                    if (confirmed) {
+                        await sessionsApi.update(sessionId, { seatingMode: 'SINGLE' });
+                        await loadSession();
+                        // Now run allocation in SINGLE mode
+                        const result = await sessionsApi.allocate(sessionId);
+                        setAllocResult(result);
+                        setSuccess(`Mode changed to SINGLE. Allocation complete! ${result.report.assignedCount} students assigned.`);
+                        loadSession();
+                        loadGrids();
+                        return;
+                    } else {
+                        setError('Double arrangement requires at least 2 different subjects.');
+                        return;
+                    }
+                }
+            }
             const result = await sessionsApi.allocate(sessionId);
             setAllocResult(result);
             setSuccess(`Allocation complete! ${result.report.assignedCount} students assigned.`);
@@ -330,6 +438,9 @@ export default function SessionDetail() {
             <div className="page-header">
                 <h2>{session.session_name}</h2>
                 <div>
+                    {session.exam_date && <span className="badge badge-info" style={{ marginRight: 8 }}>{session.exam_date}</span>}
+                    {session.slot && <span className="badge badge-info" style={{ marginRight: 8 }}>{session.slot}</span>}
+                    {session.year && <span className="badge badge-info" style={{ marginRight: 8 }}>Year {session.year}</span>}
                     <span className="badge badge-info" style={{ marginRight: 8 }}>{session.seating_mode}</span>
                     <span className="badge badge-info" style={{ marginRight: 8 }}>{session.allocation_method || 'INTERLEAVED'}</span>
                     <span className={`badge ${session.status === 'ALLOCATED' ? 'badge-success' : 'badge-warning'}`}>
@@ -374,87 +485,117 @@ export default function SessionDetail() {
                         </div>
                     </div>
 
-                    {/* Branch-Subject Mapping — multi-year support */}
+                    {/* Branch-Subject Mapping — auto-fetched from timetable */}
                     <div className="card">
                         <h3>Branch → Subject Mapping</h3>
-                        <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>
-                            Select a year, then a branch to see available subjects. You can add subjects from multiple years.
-                        </p>
 
-                        {/* Year + Branch picker */}
-                        <div className="form-row" style={{ marginBottom: 16 }}>
-                            <div className="form-group">
-                                <label>Year</label>
-                                <select value={pickerYear} onChange={e => { setPickerYear(e.target.value); setPickerBranchId(''); }}>
-                                    <option value="">— Select Year —</option>
-                                    {configuredYears.length > 0
-                                        ? configuredYears.map(y => (
-                                            <option key={y} value={y}>Year {y}</option>
-                                        ))
-                                        : [1, 2, 3, 4].map(y => (
-                                            <option key={y} value={y}>Year {y}</option>
-                                        ))
-                                    }
-                                </select>
-                            </div>
-                            <div className="form-group">
-                                <label>Branch</label>
-                                <select value={pickerBranchId} onChange={e => setPickerBranchId(e.target.value)} disabled={!pickerYear}>
-                                    <option value="">— Select Branch —</option>
-                                    {pickerBranches.map(b => (
-                                        <option key={b.id} value={b.id}>{b.branch_code} — {b.branch_name}</option>
-                                    ))}
-                                </select>
-                            </div>
-                        </div>
-
-                        {/* Show subject dropdown for selected year+branch */}
-                        {pickerBranchId && currentPickerBranch && (
+                        {/* Show auto-fetched timetable info */}
+                        {session.exam_date && session.year && timetableLoaded && timetableMappings.length > 0 && (
                             <div style={{
-                                background: '#f8f9fb', borderRadius: 8, padding: 16, marginBottom: 16,
-                                border: '1px solid #e0e0e0'
+                                background: '#e8f5e9', borderRadius: 8, padding: 16, marginBottom: 16,
+                                border: '1px solid #a5d6a7'
                             }}>
-                                <div style={{
-                                    fontWeight: 700, fontSize: 14, color: '#1a73e8', marginBottom: 8,
-                                    borderBottom: '2px solid #1a73e8', paddingBottom: 4
-                                }}>
-                                    Year {pickerYear} — {currentPickerBranch.branch_code} — {currentPickerBranch.branch_name}
-                                    <span style={{ fontWeight: 400, color: '#666', fontSize: 12, marginLeft: 8 }}>
-                                        ({currentPickerSubs.length} subjects)
-                                    </span>
+                                <div style={{ fontWeight: 700, fontSize: 14, color: '#2e7d32', marginBottom: 8 }}>
+                                    Auto-fetched from Timetable — {session.exam_date} {session.slot ? `(${session.slot})` : ''} — Year {session.year}
                                 </div>
-                                {currentPickerSubs.length > 0 ? (
-                                    <div className="form-row" style={{ alignItems: 'flex-end' }}>
-                                        <div className="form-group" style={{ flex: 1 }}>
-                                            <label>Subject</label>
-                                            <select value={pickerSubjectId}
-                                                onChange={e => setPickerSubjectId(e.target.value)}>
-                                                <option value="">— Select Subject —</option>
-                                                {currentPickerSubs
-                                                    .filter(s => !branchSubjectMappings.some(
-                                                        m => Number(m.branchId) === currentPickerBranch.id && Number(m.subjectId) === s.subject_id
-                                                    ))
-                                                    .map(s => (
-                                                        <option key={s.subject_id} value={s.subject_id}>
-                                                            {s.subject_name}
-                                                            {s.subject_type !== 'REGULAR' ? ` (${s.subject_type})` : ''}
-                                                        </option>
-                                                    ))
-                                                }
-                                            </select>
-                                        </div>
-                                        <div style={{ marginBottom: 16 }}>
-                                            <button className="btn btn-primary btn-sm" onClick={addSelectedSubject}
-                                                disabled={!pickerSubjectId}>
-                                                + Add
-                                            </button>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <p style={{ color: '#999', fontSize: 13 }}>No subjects configured for this branch in Year {pickerYear}.</p>
-                                )}
+                                <p style={{ fontSize: 13, color: '#555', marginBottom: 8 }}>
+                                    The following branches and subjects were found in the timetable for this date and slot.
+                                    Please verify and click "Save Mappings" to proceed.
+                                </p>
                             </div>
                         )}
+
+                        {session.exam_date && session.year && timetableLoaded && timetableMappings.length === 0 && branchSubjectMappings.length === 0 && (
+                            <div className="alert alert-warning" style={{ fontSize: 13, marginBottom: 16 }}>
+                                No timetable entries found for {session.exam_date} {session.slot ? `(${session.slot})` : ''} — Year {session.year}.
+                                You can add mappings manually below, or import a timetable first.
+                            </div>
+                        )}
+
+                        {/* Manual picker — always available for additions/corrections */}
+                        <details style={{ marginBottom: 16 }} open={timetableMappings.length === 0}>
+                            <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 13, color: '#1a73e8' }}>
+                                {timetableMappings.length > 0 ? 'Add/modify mappings manually' : 'Select year, branch and subjects'}
+                            </summary>
+                            <p style={{ fontSize: 13, color: '#666', marginBottom: 12, marginTop: 8 }}>
+                                Select a year, then a branch to see available subjects. You can add subjects from multiple years.
+                            </p>
+
+                            {/* Year + Branch picker */}
+                            <div className="form-row" style={{ marginBottom: 16 }}>
+                                <div className="form-group">
+                                    <label>Year</label>
+                                    <select value={pickerYear} onChange={e => { setPickerYear(e.target.value); setPickerBranchId(''); }}>
+                                        <option value="">— Select Year —</option>
+                                        {configuredYears.length > 0
+                                            ? configuredYears.map(y => (
+                                                <option key={y} value={y}>Year {y}</option>
+                                            ))
+                                            : [1, 2, 3, 4].map(y => (
+                                                <option key={y} value={y}>Year {y}</option>
+                                            ))
+                                        }
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label>Branch</label>
+                                    <select value={pickerBranchId} onChange={e => setPickerBranchId(e.target.value)} disabled={!pickerYear}>
+                                        <option value="">— Select Branch —</option>
+                                        {pickerBranches.map(b => (
+                                            <option key={b.id} value={b.id}>{b.branch_code} — {b.branch_name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Show subject dropdown for selected year+branch */}
+                            {pickerBranchId && currentPickerBranch && (
+                                <div style={{
+                                    background: '#f8f9fb', borderRadius: 8, padding: 16, marginBottom: 16,
+                                    border: '1px solid #e0e0e0'
+                                }}>
+                                    <div style={{
+                                        fontWeight: 700, fontSize: 14, color: '#1a73e8', marginBottom: 8,
+                                        borderBottom: '2px solid #1a73e8', paddingBottom: 4
+                                    }}>
+                                        Year {pickerYear} — {currentPickerBranch.branch_code} — {currentPickerBranch.branch_name}
+                                        <span style={{ fontWeight: 400, color: '#666', fontSize: 12, marginLeft: 8 }}>
+                                            ({currentPickerSubs.length} subjects)
+                                        </span>
+                                    </div>
+                                    {currentPickerSubs.length > 0 ? (
+                                        <div className="form-row" style={{ alignItems: 'flex-end' }}>
+                                            <div className="form-group" style={{ flex: 1 }}>
+                                                <label>Subject</label>
+                                                <select value={pickerSubjectId}
+                                                    onChange={e => setPickerSubjectId(e.target.value)}>
+                                                    <option value="">— Select Subject —</option>
+                                                    {currentPickerSubs
+                                                        .filter(s => !branchSubjectMappings.some(
+                                                            m => Number(m.branchId) === currentPickerBranch.id && Number(m.subjectId) === s.subject_id
+                                                        ))
+                                                        .map(s => (
+                                                            <option key={s.subject_id} value={s.subject_id}>
+                                                                {s.subject_name}
+                                                                {s.subject_type !== 'REGULAR' ? ` (${s.subject_type})` : ''}
+                                                            </option>
+                                                        ))
+                                                    }
+                                                </select>
+                                            </div>
+                                            <div style={{ marginBottom: 16 }}>
+                                                <button className="btn btn-primary btn-sm" onClick={addSelectedSubject}
+                                                    disabled={!pickerSubjectId}>
+                                                    + Add
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <p style={{ color: '#999', fontSize: 13 }}>No subjects configured for this branch in Year {pickerYear}.</p>
+                                    )}
+                                </div>
+                            )}
+                        </details>
 
                         {/* Selected mappings summary */}
                         {branchSubjectMappings.length > 0 && (
@@ -555,8 +696,9 @@ export default function SessionDetail() {
                         )}
 
                         {studentEntries.map((entry, i) => {
-                            const year = entry.year || pickerYear || configuredYears[0];
-                            const key = `${year}-${entry.branchId}`;
+                            const year = entry.year || session?.year || pickerYear || configuredYears[0];
+                            const isElective = entry.subjectType === 'PE' || entry.subjectType === 'OE';
+                            const key = isElective ? `${year}-sub-${entry.subjectId}` : `${year}-${entry.branchId}`;
                             const branchStudents = dbStudents[key] || [];
 
                             return (

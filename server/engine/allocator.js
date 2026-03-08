@@ -71,6 +71,23 @@
  * @returns {{ allocations: Array, report: Object }}
  */
 function allocateSeats({ rooms, students, mode, allocationMethod = 'INTERLEAVED' }) {
+    // Auto-switch: if DOUBLE mode but every student has the same subject,
+    // pairing is impossible — fall back to SINGLE to avoid wasting bench capacity.
+    if (mode === 'DOUBLE' && students.length > 0) {
+        const subjects = new Set(students.map(s => s.subject_name));
+        if (subjects.size === 1) {
+            const fallbackMode = 'SINGLE';
+            const result = allocationMethod === 'LINEAR'
+                ? allocateLinearSingle(rooms, students)
+                : allocateSingle(rooms, students);
+            result.report.modeAutoSwitched = true;
+            result.report.modeAutoSwitchedReason =
+                `All students share the same subject ("${[...subjects][0]}"). ` +
+                `Switched from DOUBLE to SINGLE mode automatically.`;
+            return result;
+        }
+    }
+
     if (allocationMethod === 'LINEAR') {
         if (mode === 'DOUBLE') {
             return allocateLinearDouble(rooms, students);
@@ -328,14 +345,16 @@ function allocateLinearSingle(rooms, students) {
 //
 //    1. Seat A ← next student from the branch at pointer pA.
 //    2. Seat B ← next student from the branch at pointer pB
-//       (pB always points to a DIFFERENT branch than pA).
+//       (pB always points to a DIFFERENT branch AND a
+//        DIFFERENT SUBJECT than pA).
 //    3. When the pB branch is exhausted, pB advances to the
-//       next non-empty branch (skipping pA's branch).
+//       next non-empty branch with a different subject than pA.
 //    4. When the pA branch is exhausted, pA advances forward.
-//       If pB is now ≤ pA, pB advances past pA.
-//    5. If only one branch remains (no valid pB), students
-//       from that branch seat on A only — seat B stays empty.
-//       This guarantees the SAME branch NEVER shares a bench.
+//       pB is recalculated to find a branch with a different
+//       subject than the new pA.
+//    5. If no branch with a different subject remains, students
+//       seat on A only — seat B stays empty.
+//       This guarantees no same-subject pair shares a bench.
 //
 //  Result: large contiguous blocks of the same two branches,
 //  exactly matching the university LINEAR seating layout.
@@ -344,21 +363,51 @@ function allocateLinearSingle(rooms, students) {
 function allocateLinearDouble(rooms, students) {
     const totalSeats = rooms.reduce((sum, r) => sum + r.rows * r.columns * 2, 0);
 
-    // Group by branch, sort each group by roll number
-    const branchGroups = groupByBranch(students);
-    const branchOrder = Object.keys(branchGroups).sort();
+    // Group by branch+subject so that the same branch with different elective
+    // subjects gets separate queues that can be paired together.
+    const branchSubjectGroups = {};
+    for (const s of students) {
+        const key = `${s.branch_code}::${s.subject_name}`;
+        if (!branchSubjectGroups[key]) branchSubjectGroups[key] = [];
+        branchSubjectGroups[key].push(s);
+    }
+    for (const key of Object.keys(branchSubjectGroups)) {
+        branchSubjectGroups[key].sort((a, b) => {
+            const ra = parseInt(a.roll_number, 10);
+            const rb = parseInt(b.roll_number, 10);
+            if (!isNaN(ra) && !isNaN(rb)) return ra - rb;
+            return String(a.roll_number).localeCompare(String(b.roll_number));
+        });
+    }
+    const groupOrder = Object.keys(branchSubjectGroups).sort();
 
-    // Build ordered queues
-    const queues = branchOrder.map(b => ({
-        branch: b,
-        students: [...branchGroups[b]],
-        idx: 0
-    }));
+    // Build ordered queues, recording each group's subject
+    const queues = groupOrder.map(key => {
+        const grpStudents = [...branchSubjectGroups[key]];
+        return {
+            branch: key,
+            subject: grpStudents[0] ? grpStudents[0].subject_name : '',
+            students: grpStudents,
+            idx: 0
+        };
+    });
 
     // Find the first non-exhausted queue at or after index `from`
     function findActive(from) {
         for (let i = from; i < queues.length; i++) {
             if (queues[i].idx < queues[i].students.length) return i;
+        }
+        return -1;
+    }
+
+    // Find active queue with a DIFFERENT subject than `skipSubject`,
+    // starting from index `from` and skipping index `skipIdx`.
+    function findActiveWithDiffSubject(from, skipIdx, skipSubject) {
+        for (let i = from; i < queues.length; i++) {
+            if (i === skipIdx) continue;
+            if (queues[i].idx < queues[i].students.length && queues[i].subject !== skipSubject) {
+                return i;
+            }
         }
         return -1;
     }
@@ -369,9 +418,9 @@ function allocateLinearDouble(rooms, students) {
     const allocations = [];
     const assigned = new Set();
 
-    // Two branch pointers — always different branches
+    // Two branch pointers — always different branches AND different subjects
     let pA = findActive(0);
-    let pB = pA >= 0 ? findActive(pA + 1) : -1;
+    let pB = pA >= 0 ? findActiveWithDiffSubject(0, pA, queues[pA].subject) : -1;
 
     for (const slot of benchSlots) {
         if (pA < 0) break; // all students placed
@@ -391,7 +440,7 @@ function allocateLinearDouble(rooms, students) {
             subjectName: studentA.subject_name
         });
 
-        // ── Seat B: from branch at pB (different branch) ──────
+        // ── Seat B: from branch at pB (different branch + different subject) ──
         if (pB >= 0 && queues[pB].idx < queues[pB].students.length) {
             const qB = queues[pB];
             const studentB = qB.students[qB.idx++];
@@ -407,19 +456,19 @@ function allocateLinearDouble(rooms, students) {
                 subjectName: studentB.subject_name
             });
 
-            // If B branch exhausted, advance pB (skip pA's branch)
+            // If B branch exhausted, find next active with different subject
             if (qB.idx >= qB.students.length) {
-                pB = findActive(pB + 1);
-                if (pB === pA) pB = findActive(pB + 1);
+                pB = findActiveWithDiffSubject(0, pA, queues[pA].subject);
             }
         }
 
-        // If A branch exhausted, advance pA
+        // If A branch exhausted, advance pA and recalculate pB
         if (qA.idx >= qA.students.length) {
             pA = findActive(pA + 1);
-            // Ensure pB is still after pA and different
-            if (pA >= 0 && (pB < 0 || pB <= pA)) {
-                pB = findActive(pA + 1);
+            if (pA >= 0) {
+                pB = findActiveWithDiffSubject(0, pA, queues[pA].subject);
+            } else {
+                pB = -1;
             }
         }
     }

@@ -9,11 +9,11 @@ const { getDb } = require('../db/connection');
 const ExamSessionModel = {
     // ─── SESSION CRUD ────────────────────────────────────────────
 
-    create({ sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year }) {
+    create({ sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year, slot }) {
         const db = getDb();
         const stmt = db.prepare(`
-      INSERT INTO exam_sessions (session_name, exam_date, start_time, end_time, seating_mode, allocation_method, year)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO exam_sessions (session_name, exam_date, start_time, end_time, seating_mode, allocation_method, year, slot)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
         const result = stmt.run(
             sessionName,
@@ -22,7 +22,8 @@ const ExamSessionModel = {
             endTime || null,
             seatingMode || 'SINGLE',
             allocationMethod || 'INTERLEAVED',
-            year || null
+            year || null,
+            slot || null
         );
         return this.getById(result.lastInsertRowid);
     },
@@ -39,7 +40,7 @@ const ExamSessionModel = {
 
     update(id, fields) {
         const db = getDb();
-        const allowed = ['session_name', 'exam_date', 'start_time', 'end_time', 'seating_mode', 'allocation_method', 'status'];
+        const allowed = ['session_name', 'exam_date', 'start_time', 'end_time', 'seating_mode', 'allocation_method', 'status', 'slot'];
         const mapping = {
             sessionName: 'session_name',
             examDate: 'exam_date',
@@ -48,7 +49,8 @@ const ExamSessionModel = {
             seatingMode: 'seating_mode',
             allocationMethod: 'allocation_method',
             status: 'status',
-            year: 'year'
+            year: 'year',
+            slot: 'slot'
         };
         const sets = [];
         const vals = [];
@@ -115,10 +117,14 @@ const ExamSessionModel = {
     getBranchSubjects(sessionId) {
         const db = getDb();
         return db.prepare(`
-      SELECT sbs.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name
+      SELECT sbs.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name,
+             ybs.subject_type
       FROM session_branch_subjects sbs
       JOIN branches b ON b.id = sbs.branch_id
       JOIN subjects s ON s.id = sbs.subject_id
+      JOIN exam_sessions es ON es.id = sbs.session_id
+      LEFT JOIN year_branch_subjects ybs
+        ON ybs.year = es.year AND ybs.branch_id = sbs.branch_id AND ybs.subject_id = sbs.subject_id
       WHERE sbs.session_id = ?
       ORDER BY b.branch_code
     `).all(sessionId);

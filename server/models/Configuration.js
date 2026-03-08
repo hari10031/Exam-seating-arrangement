@@ -203,12 +203,12 @@ const ConfigurationModel = {
     setExamTimetable(entries) {
         const db = getDb();
         const ins = db.prepare(`
-            INSERT OR REPLACE INTO exam_timetable (year, branch_id, subject_id, exam_date, slot)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot)
+            VALUES (?, ?, ?, ?, ?, ?)
         `);
         const txn = db.transaction(() => {
             for (const e of entries) {
-                ins.run(e.year, e.branchId, e.subjectId, e.examDate, e.slot || null);
+                ins.run(e.year, e.branchId, e.subjectId, e.examDate, e.slot || null, e.timeSlot || null);
             }
         });
         txn();
@@ -221,13 +221,13 @@ const ConfigurationModel = {
         const db = getDb();
         const del = db.prepare('DELETE FROM exam_timetable WHERE year = ?');
         const ins = db.prepare(`
-            INSERT INTO exam_timetable (year, branch_id, subject_id, exam_date, slot)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot)
+            VALUES (?, ?, ?, ?, ?, ?)
         `);
         const txn = db.transaction(() => {
             del.run(year);
             for (const e of entries) {
-                ins.run(year, e.branchId, e.subjectId, e.examDate, e.slot || null);
+                ins.run(year, e.branchId, e.subjectId, e.examDate, e.slot || null, e.timeSlot || null);
             }
         });
         txn();
@@ -236,19 +236,22 @@ const ConfigurationModel = {
     /**
      * Get timetable entries for a date and optional slot.
      */
-    getExamTimetableByDate(examDate, slot = null) {
+    getExamTimetableByDate(examDate, timeSlot = null) {
         const db = getDb();
         let sql = `
-            SELECT et.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name
+            SELECT et.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name,
+                   ybs.subject_type
             FROM exam_timetable et
             JOIN branches b ON b.id = et.branch_id
             JOIN subjects s ON s.id = et.subject_id
+            LEFT JOIN year_branch_subjects ybs
+              ON ybs.year = et.year AND ybs.branch_id = et.branch_id AND ybs.subject_id = et.subject_id
             WHERE et.exam_date = ?
         `;
         const params = [examDate];
-        if (slot) {
-            sql += ' AND et.slot = ?';
-            params.push(slot);
+        if (timeSlot) {
+            sql += ' AND et.time_slot = ?';
+            params.push(timeSlot);
         }
         sql += ' ORDER BY et.year, b.branch_code';
         return db.prepare(sql).all(...params);
@@ -281,6 +284,50 @@ const ConfigurationModel = {
             JOIN subjects s ON s.id = et.subject_id
             ORDER BY et.year, et.exam_date, et.slot, b.branch_code
         `).all();
+    },
+
+    /**
+     * Get unique exam dates from timetable, optionally filtered by year.
+     */
+    getExamDates(year = null) {
+        const db = getDb();
+        if (year) {
+            return db.prepare(`
+                SELECT DISTINCT exam_date FROM exam_timetable
+                WHERE year = ? ORDER BY exam_date
+            `).all(year).map(r => r.exam_date);
+        }
+        return db.prepare(`
+            SELECT DISTINCT exam_date FROM exam_timetable ORDER BY exam_date
+        `).all().map(r => r.exam_date);
+    },
+
+    /**
+     * Get unique time slots for a given date (and optional year).
+     * Returns time_slot values like "10:00-11:10", "2:30-3:40".
+     */
+    getSlotsForDate(examDate, year = null) {
+        const db = getDb();
+        if (year) {
+            return db.prepare(`
+                SELECT DISTINCT time_slot FROM exam_timetable
+                WHERE exam_date = ? AND year = ? AND time_slot IS NOT NULL ORDER BY time_slot
+            `).all(examDate, year).map(r => r.time_slot);
+        }
+        return db.prepare(`
+            SELECT DISTINCT time_slot FROM exam_timetable
+            WHERE exam_date = ? AND time_slot IS NOT NULL ORDER BY time_slot
+        `).all(examDate).map(r => r.time_slot);
+    },
+
+    /**
+     * Get unique years from timetable.
+     */
+    getTimetableYears() {
+        const db = getDb();
+        return db.prepare(`
+            SELECT DISTINCT year FROM exam_timetable ORDER BY year
+        `).all().map(r => r.year);
     },
 
     /**
@@ -343,6 +390,29 @@ const ConfigurationModel = {
             WHERE year = ? AND UPPER(branch_code) = UPPER(?)
             ORDER BY roll_number
         `).all(year, branchCode);
+    },
+
+    /**
+     * Get roll numbers for students who chose a specific elective subject.
+     * Uses student_electives table and joins with student_master for names.
+     */
+    getRollNumbersForElective(year, subjectId) {
+        const db = getDb();
+        return db.prepare(`
+            SELECT DISTINCT se.roll_number, sm.student_name
+            FROM student_electives se
+            LEFT JOIN student_master sm ON sm.roll_number = se.roll_number
+            WHERE se.year = ?
+              AND (
+                se.subject_id = ?
+                OR se.subject_id IN (
+                  SELECT s2.id FROM subjects s2
+                  JOIN subjects s1 ON s1.id = ?
+                  WHERE s1.subject_name LIKE '%(' || s2.subject_name || ')%'
+                )
+              )
+            ORDER BY se.roll_number
+        `).all(year, subjectId, subjectId);
     },
 
     /**

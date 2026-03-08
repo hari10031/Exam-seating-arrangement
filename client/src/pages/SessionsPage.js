@@ -1,24 +1,58 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { sessionsApi } from '../api';
+import { sessionsApi, configApi } from '../api';
 
 export default function SessionsPage() {
     const [sessions, setSessions] = useState([]);
     const [form, setForm] = useState({
-        sessionName: '', examDate: '', startTime: '', endTime: '', seatingMode: 'SINGLE', allocationMethod: 'INTERLEAVED'
+        sessionName: '', examDate: '', slot: '', seatingMode: 'SINGLE', allocationMethod: 'INTERLEAVED', year: ''
     });
+    const [timetableYears, setTimetableYears] = useState([]);
+    const [timetableDates, setTimetableDates] = useState([]);
+    const [timetableSlots, setTimetableSlots] = useState([]);
     const [error, setError] = useState('');
     const navigate = useNavigate();
 
     const load = () => sessionsApi.getAll().then(setSessions).catch(e => setError(e.message));
     useEffect(() => { load(); }, []);
 
+    // Load timetable years on mount
+    useEffect(() => {
+        configApi.getTimetableYears().then(setTimetableYears).catch(() => setTimetableYears([]));
+    }, []);
+
+    // When year changes, load dates for that year
+    useEffect(() => {
+        if (!form.year) { setTimetableDates([]); setTimetableSlots([]); return; }
+        configApi.getTimetableDates(form.year)
+            .then(setTimetableDates)
+            .catch(() => setTimetableDates([]));
+        setForm(f => ({ ...f, examDate: '', slot: '' }));
+        setTimetableSlots([]);
+    }, [form.year]);
+
+    // When date changes, load slots for that date + year
+    useEffect(() => {
+        if (!form.examDate) { setTimetableSlots([]); return; }
+        configApi.getTimetableSlots(form.examDate, form.year)
+            .then(setTimetableSlots)
+            .catch(() => setTimetableSlots([]));
+        setForm(f => ({ ...f, slot: '' }));
+    }, [form.examDate, form.year]);
+
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
         try {
-            const session = await sessionsApi.create(form);
-            setForm({ sessionName: '', examDate: '', startTime: '', endTime: '', seatingMode: 'SINGLE', allocationMethod: 'INTERLEAVED' });
+            const session = await sessionsApi.create({
+                sessionName: form.sessionName,
+                examDate: form.examDate,
+                seatingMode: form.seatingMode,
+                allocationMethod: form.allocationMethod,
+                year: form.year ? Number(form.year) : null,
+                slot: form.slot || null
+            });
+            setForm({ sessionName: '', examDate: '', slot: '', seatingMode: 'SINGLE', allocationMethod: 'INTERLEAVED', year: '' });
             navigate(`/sessions/${session.id}`);
         } catch (err) {
             setError(err.message);
@@ -43,24 +77,48 @@ export default function SessionsPage() {
                         <div className="form-group">
                             <label>Session Name</label>
                             <input value={form.sessionName} onChange={e => setForm({ ...form, sessionName: e.target.value })}
-                                placeholder="e.g. Mid-Sem Dec 2025 – Slot A" required />
+                                placeholder="e.g. Mid-Sem Dec 2025 – CIE-I" required />
                         </div>
                         <div className="form-group">
-                            <label>Exam Date</label>
-                            <input type="date" value={form.examDate}
-                                onChange={e => setForm({ ...form, examDate: e.target.value })} required />
+                            <label>Year</label>
+                            <select value={form.year} onChange={e => setForm({ ...form, year: e.target.value })} required>
+                                <option value="">— Select Year —</option>
+                                {timetableYears.length > 0
+                                    ? timetableYears.map(y => <option key={y} value={y}>Year {y}</option>)
+                                    : [1, 2, 3, 4].map(y => <option key={y} value={y}>Year {y}</option>)
+                                }
+                            </select>
                         </div>
                     </div>
                     <div className="form-row">
                         <div className="form-group">
-                            <label>Start Time</label>
-                            <input type="time" value={form.startTime}
-                                onChange={e => setForm({ ...form, startTime: e.target.value })} />
+                            <label>Exam Date</label>
+                            {timetableDates.length > 0 ? (
+                                <select value={form.examDate} onChange={e => setForm({ ...form, examDate: e.target.value })} required>
+                                    <option value="">— Select Date —</option>
+                                    {timetableDates.map(d => <option key={d} value={d}>{d}</option>)}
+                                </select>
+                            ) : (
+                                <input type="date" value={form.examDate}
+                                    onChange={e => setForm({ ...form, examDate: e.target.value })} required />
+                            )}
                         </div>
                         <div className="form-group">
-                            <label>End Time</label>
-                            <input type="time" value={form.endTime}
-                                onChange={e => setForm({ ...form, endTime: e.target.value })} />
+                            <label>Slot</label>
+                            {timetableSlots.length > 0 ? (
+                                <select value={form.slot} onChange={e => setForm({ ...form, slot: e.target.value })} required>
+                                    <option value="">— Select Slot —</option>
+                                    {timetableSlots.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                            ) : (
+                                <select value={form.slot} onChange={e => setForm({ ...form, slot: e.target.value })}>
+                                    <option value="">— No slot —</option>
+                                    <option value="10:00-11:10">10:00-11:10</option>
+                                    <option value="11:30-12:40">11:30-12:40</option>
+                                    <option value="1:00-2:10">1:00-2:10</option>
+                                    <option value="2:30-3:40">2:30-3:40</option>
+                                </select>
+                            )}
                         </div>
                         <div className="form-group">
                             <label>Seating Mode</label>
@@ -93,7 +151,8 @@ export default function SessionsPage() {
                             <tr>
                                 <th>Session</th>
                                 <th>Date</th>
-                                <th>Time</th>
+                                <th>Slot</th>
+                                <th>Year</th>
                                 <th>Mode</th>
                                 <th>Method</th>
                                 <th>Status</th>
@@ -109,7 +168,8 @@ export default function SessionsPage() {
                                         </a>
                                     </td>
                                     <td>{s.exam_date}</td>
-                                    <td>{s.start_time && s.end_time ? `${s.start_time} – ${s.end_time}` : '—'}</td>
+                                    <td>{s.slot || '—'}</td>
+                                    <td>{s.year ? `Year ${s.year}` : '—'}</td>
                                     <td><span className="badge badge-info">{s.seating_mode}</span></td>
                                     <td><span className="badge badge-info">{s.allocation_method || 'INTERLEAVED'}</span></td>
                                     <td>
@@ -126,7 +186,7 @@ export default function SessionsPage() {
                                 </tr>
                             ))}
                             {sessions.length === 0 && (
-                                <tr><td colSpan="7" style={{ textAlign: 'center', color: '#999' }}>No sessions yet</td></tr>
+                                <tr><td colSpan="8" style={{ textAlign: 'center', color: '#999' }}>No sessions yet</td></tr>
                             )}
                         </tbody>
                     </table>

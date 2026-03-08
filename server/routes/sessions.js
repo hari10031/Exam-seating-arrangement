@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 const ExamSessionModel = require('../models/ExamSession');
 const AllocationModel = require('../models/Allocation');
+const ConfigurationModel = require('../models/Configuration');
 const { allocateSeats, validateAllocation, buildRoomWiseSummary } = require('../engine');
 const { generateExcel } = require('../export/excel');
 const { generatePDF } = require('../export/pdf');
@@ -52,14 +53,61 @@ router.get('/:id', (req, res) => {
 // POST /api/sessions
 router.post('/', (req, res) => {
     try {
-        const { sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year } = req.body;
+        const { sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year, slot } = req.body;
         if (!sessionName || !examDate) {
             return res.status(400).json({ error: 'sessionName and examDate are required' });
         }
         const session = ExamSessionModel.create({
-            sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year
+            sessionName, examDate, startTime, endTime, seatingMode, allocationMethod, year, slot
         });
-        res.status(201).json(session);
+
+        // Auto-map branch-subjects and students from timetable
+        if (year && examDate) {
+            try {
+                const entries = ConfigurationModel.getExamTimetableByDate(examDate, slot || null);
+                const yearEntries = entries.filter(e => e.year === Number(year));
+                if (yearEntries.length > 0) {
+                    // Save branch-subject mappings
+                    const mappings = yearEntries.map(e => ({
+                        branchId: e.branch_id,
+                        subjectId: e.subject_id
+                    }));
+                    ExamSessionModel.assignBranchSubjects(session.id, mappings);
+
+                    // Auto-populate students from student_master
+                    // For elective subjects (PE/OE), use student_electives mapping
+                    // For regular subjects, use all students in the branch
+                    const studentEntries = [];
+                    for (const e of yearEntries) {
+                        const isElective = e.subject_type === 'PE' || e.subject_type === 'OE';
+                        let students;
+                        if (isElective) {
+                            students = ConfigurationModel.getRollNumbersForElective(Number(year), e.subject_id);
+                        } else {
+                            students = ConfigurationModel.getRollNumbers(Number(year), e.branch_code);
+                        }
+                        if (students.length > 0) {
+                            studentEntries.push({
+                                branchId: e.branch_id,
+                                subjectId: e.subject_id,
+                                rollNumbers: students.map(s => s.roll_number),
+                                exclude: [],
+                                include: []
+                            });
+                        }
+                    }
+                    if (studentEntries.length > 0) {
+                        ExamSessionModel.setStudentsFromDb(session.id, studentEntries);
+                    }
+                }
+            } catch (autoErr) {
+                console.error('Auto-map from timetable failed (non-fatal):', autoErr.message);
+            }
+        }
+
+        // Return full session details so client sees the auto-mapped data
+        const fullSession = ExamSessionModel.getFullDetails(session.id);
+        res.status(201).json(fullSession || session);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -298,7 +346,14 @@ router.get('/:id/export/excel', async (req, res) => {
             allocations,
             roomGrids,
             report,
-            roomSummary
+            roomSummary,
+            sessionInfo: {
+                examDate: session.exam_date || '',
+                startTime: session.start_time || '',
+                endTime: session.end_time || '',
+                slot: session.slot || '',
+                year: session.year || ''
+            }
         });
 
         const safeNameXls = session.session_name.replace(/[^a-zA-Z0-9_-]/g, '_');

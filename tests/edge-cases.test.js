@@ -454,7 +454,7 @@ describe('LINEAR DOUBLE Mode', () => {
         });
     });
 
-    test('single branch in linear double → solos only', () => {
+    test('single branch in linear double → auto-switches to SINGLE', () => {
         const rooms = [makeRoom(1, 'R1', 3, 3)];
         const students = Array.from({ length: 5 }, (_, i) =>
             makeStudent(i + 1, 100 + i, 'CSE', 'DS')
@@ -463,8 +463,65 @@ describe('LINEAR DOUBLE Mode', () => {
             rooms, students, mode: 'DOUBLE', allocationMethod: 'LINEAR'
         });
         expect(report.assignedCount).toBe(5);
-        // All seat A, no seat B (can't pair same branch)
+        // Auto-switched to SINGLE: all seat A, no seat B
         expect(allocations.every(a => a.seatPosition === 'A')).toBe(true);
+        expect(report.modeAutoSwitched).toBe(true);
+        expect(report.modeAutoSwitchedReason).toContain('SINGLE');
+    });
+
+    test('same-subject branches paired with different-subject branch, not each other', () => {
+        // CIC and CSD have same subject (Maths), CSE has different (Physics)
+        const rooms = [makeRoom(1, 'R1', 5, 5)]; // 25 benches
+        const students = [
+            ...Array.from({ length: 5 }, (_, i) => makeStudent(i + 1, 100 + i, 'CIC', 'Maths')),
+            ...Array.from({ length: 5 }, (_, i) => makeStudent(i + 6, 200 + i, 'CSD', 'Maths')),
+            ...Array.from({ length: 10 }, (_, i) => makeStudent(i + 11, 300 + i, 'CSE', 'Physics')),
+        ];
+        const { allocations } = allocateSeats({
+            rooms, students, mode: 'DOUBLE', allocationMethod: 'LINEAR'
+        });
+
+        // Group by bench and check no same-subject pairs
+        const benches = {};
+        allocations.forEach(a => {
+            const key = `${a.rowNumber}-${a.columnNumber}`;
+            if (!benches[key]) benches[key] = {};
+            benches[key][a.seatPosition] = a;
+        });
+        Object.values(benches).forEach(bench => {
+            if (bench.A && bench.B) {
+                expect(bench.A.subjectName).not.toBe(bench.B.subjectName);
+            }
+        });
+    });
+
+    test('all branches same subject in DOUBLE → auto-switch to SINGLE', () => {
+        const rooms = [makeRoom(1, 'R1', 5, 5)];
+        const students = [
+            ...Array.from({ length: 5 }, (_, i) => makeStudent(i + 1, 100 + i, 'CIC', 'Maths')),
+            ...Array.from({ length: 5 }, (_, i) => makeStudent(i + 6, 200 + i, 'CSD', 'Maths')),
+            ...Array.from({ length: 5 }, (_, i) => makeStudent(i + 11, 300 + i, 'CSE', 'Maths')),
+        ];
+        const { allocations, report } = allocateSeats({
+            rooms, students, mode: 'DOUBLE', allocationMethod: 'LINEAR'
+        });
+        expect(report.modeAutoSwitched).toBe(true);
+        expect(report.modeAutoSwitchedReason).toContain('Maths');
+        expect(report.assignedCount).toBe(15);
+        // All seat A since auto-switched to SINGLE
+        expect(allocations.every(a => a.seatPosition === 'A')).toBe(true);
+    });
+
+    test('all same subject in INTERLEAVED DOUBLE → auto-switch to SINGLE', () => {
+        const rooms = [makeRoom(1, 'R1', 5, 5)];
+        const students = [
+            ...Array.from({ length: 10 }, (_, i) => makeStudent(i + 1, 100 + i, 'CSE', 'DS')),
+        ];
+        const { report } = allocateSeats({
+            rooms, students, mode: 'DOUBLE', allocationMethod: 'INTERLEAVED'
+        });
+        expect(report.modeAutoSwitched).toBe(true);
+        expect(report.assignedCount).toBe(10);
     });
 });
 
@@ -715,7 +772,7 @@ describe('Validator — Edge Cases', () => {
         expect(result.valid).toBe(true);
     });
 
-    test('LINEAR DOUBLE same-subject pair is warning not error', () => {
+    test('LINEAR DOUBLE same-subject pair is now an error', () => {
         const allocations = [
             { studentId: 1, rollNumber: '101', roomId: 1, rowNumber: 1, columnNumber: 1, seatPosition: 'A', subjectName: 'DS' },
             { studentId: 2, rollNumber: '102', roomId: 1, rowNumber: 1, columnNumber: 1, seatPosition: 'B', subjectName: 'DS' },
@@ -728,9 +785,8 @@ describe('Validator — Edge Cases', () => {
             allocations, students, report, mode: 'DOUBLE', rooms,
             allocationMethod: 'LINEAR'
         });
-        // Should be warning, not error
-        expect(result.valid).toBe(true);
-        expect(result.warnings.some(w => w.includes('SAME_SUBJECT_PAIR'))).toBe(true);
+        expect(result.valid).toBe(false);
+        expect(result.errors.some(e => e.includes('SAME_SUBJECT_PAIR'))).toBe(true);
     });
 
     test('over capacity detected', () => {

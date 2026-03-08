@@ -67,19 +67,10 @@ function validateAllocation({ allocations, students, report, mode, rooms, alloca
             if (seats.A && seats.B) {
                 if (seats.A.subjectName && seats.B.subjectName) {
                     if (seats.A.subjectName === seats.B.subjectName) {
-                        if (allocationMethod === 'LINEAR') {
-                            // In LINEAR mode, same-subject pairs are expected when
-                            // a branch overflows and fills remaining seats.
-                            warnings.push(
-                                `SAME_SUBJECT_PAIR (LINEAR): Bench ${benchKey} has same subject ` +
-                                `"${seats.A.subjectName}" (Rolls: ${seats.A.rollNumber}, ${seats.B.rollNumber}).`
-                            );
-                        } else {
-                            errors.push(
-                                `SAME_SUBJECT_PAIR: Bench ${benchKey} has two students with the same subject ` +
-                                `"${seats.A.subjectName}" (Rolls: ${seats.A.rollNumber}, ${seats.B.rollNumber}).`
-                            );
-                        }
+                        errors.push(
+                            `SAME_SUBJECT_PAIR: Bench ${benchKey} has two students with the same subject ` +
+                            `"${seats.A.subjectName}" (Rolls: ${seats.A.rollNumber}, ${seats.B.rollNumber}).`
+                        );
                     }
                 }
             }

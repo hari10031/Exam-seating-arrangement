@@ -20,7 +20,7 @@ const ExcelJS = require('exceljs');
  * @param {Object} params.report       - Validation report
  * @returns {Promise<Buffer>}
  */
-async function generateExcel({ sessionName, allocations, roomGrids, report, roomSummary = [] }) {
+async function generateExcel({ sessionName, allocations, roomGrids, report, roomSummary = [], sessionInfo = {} }) {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'Exam Seating System';
     workbook.created = new Date();
@@ -170,118 +170,431 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         summarySheet.autoFilter = { from: 'A1', to: 'F1' };
     }
 
-    // ── PER-ROOM, PER-BRANCH ATTENDANCE SHEETS (Name, Roll, Signature) ─────
-    // Get allocations grouped by room and then by branch
+    // ── COMMON DATA & HELPERS ──────────────────────────────────────────────────
+
+    // Derive semester label from year
+    const yearNum = Number(sessionInfo.year) || 0;
+    const semLabels = { 1: 'I/II SEM', 2: 'III/IV SEM', 3: 'V/VI SEM', 4: 'VII/VIII SEM' };
+    const semLabel = semLabels[yearNum] || '';
+    const examDate = sessionInfo.examDate || '';
+    const timeSlot = sessionInfo.slot || '';
+
+    // Thin border helper
+    const thinBorder = {
+        top: { style: 'thin' }, bottom: { style: 'thin' },
+        left: { style: 'thin' }, right: { style: 'thin' }
+    };
+
+    // Group allocations by room+branch+subject
     const allocationsByRoomBranch = {};
     for (const a of allocations) {
         const roomCode = a.room_code || a.roomCode || 'Unknown';
         const branchCode = a.branch_code || a.branchCode || 'Unknown';
-        const key = `${roomCode}|||${branchCode}`;
+        const subjectName = a.subject_name || a.subjectName || 'Unknown';
+        const subjectCode = a.subject_code || a.subjectCode || '';
+        const studentName = a.student_name || a.studentName || '';
+        const key = `${roomCode}|||${branchCode}|||${subjectName}`;
         if (!allocationsByRoomBranch[key]) {
-            allocationsByRoomBranch[key] = {
-                roomCode,
-                branchCode,
-                allocations: []
-            };
+            allocationsByRoomBranch[key] = { roomCode, branchCode, subjectName, subjectCode, allocations: [] };
         }
         allocationsByRoomBranch[key].allocations.push(a);
     }
 
-    // Sort keys by room then branch
     const sortedKeys = Object.keys(allocationsByRoomBranch).sort((a, b) => {
-        const [roomA, branchA] = a.split('|||');
-        const [roomB, branchB] = b.split('|||');
+        const [roomA, branchA, subjA] = a.split('|||');
+        const [roomB, branchB, subjB] = b.split('|||');
         if (roomA !== roomB) return roomA.localeCompare(roomB);
-        return branchA.localeCompare(branchB);
+        if (branchA !== branchB) return branchA.localeCompare(branchB);
+        return subjA.localeCompare(subjB);
     });
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  PER-ROOM ATTENDANCE SHEETS  (S.No | Roll No | Name | Sign)
+    // ══════════════════════════════════════════════════════════════════════════
     for (const key of sortedKeys) {
-        const { roomCode, branchCode, allocations: roomBranchAllocations } = allocationsByRoomBranch[key];
+        const { roomCode, branchCode, subjectName, allocations: roomBranchAllocs } = allocationsByRoomBranch[key];
 
-        // Sheet name: "RoomCode-Branch" (max 31 chars for Excel)
-        const attendanceSheetName = `${roomCode}-${branchCode}`.substring(0, 31);
-        const attendanceSheet = workbook.addWorksheet(attendanceSheetName);
+        const sheetName = `${roomCode}-${branchCode}`.substring(0, 31);
+        let finalSheetName = sheetName;
+        let counter = 2;
+        while (workbook.getWorksheet(finalSheetName)) {
+            const sfx = `-${counter}`;
+            finalSheetName = sheetName.substring(0, 31 - sfx.length) + sfx;
+            counter++;
+        }
+        const ws = workbook.addWorksheet(finalSheetName);
 
-        // Set columns
-        attendanceSheet.columns = [
-            { header: 'S.No', key: 'sNo', width: 8 },
-            { header: 'Roll Number', key: 'rollNumber', width: 20 },
-            { header: 'Student Name', key: 'studentName', width: 30 },
-            { header: 'Signature', key: 'signature', width: 25 }
-        ];
+        const COLS = 5; // A-E for info, then table uses A-D
+        ws.getColumn(1).width = 10;
+        ws.getColumn(2).width = 22;
+        ws.getColumn(3).width = 35;
+        ws.getColumn(4).width = 18;
+        ws.getColumn(5).width = 20;
 
-        // Title row (merge and style)
-        attendanceSheet.insertRow(1, []);
-        attendanceSheet.mergeCells('A1:D1');
-        const titleCell = attendanceSheet.getCell('A1');
-        titleCell.value = `Room: ${roomCode} | Branch: ${branchCode} - Attendance Sheet`;
-        titleCell.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-        titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
-        titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
-        attendanceSheet.getRow(1).height = 25;
-
-        // Style header row (now row 2)
-        const headerRow = attendanceSheet.getRow(2);
-        headerRow.eachCell(cell => {
-            cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4A4A4A' } };
-            cell.alignment = { horizontal: 'center', vertical: 'middle' };
-            cell.border = {
-                top: { style: 'thin' }, bottom: { style: 'thin' },
-                left: { style: 'thin' }, right: { style: 'thin' }
-            };
-        });
-
-        // Sort allocations by roll number
-        const sortedAllocations = roomBranchAllocations
+        const sortedAllocs = roomBranchAllocs
             .filter(a => a.roll_number || a.rollNumber)
-            .sort((a, b) => {
-                const rollA = a.roll_number || a.rollNumber || '';
-                const rollB = b.roll_number || b.rollNumber || '';
-                return rollA.localeCompare(rollB);
-            });
+            .sort((a, b) => (a.roll_number || a.rollNumber || '').localeCompare(b.roll_number || b.rollNumber || ''));
+        const totalStudents = sortedAllocs.length;
 
-        // Add data rows
-        let sNo = 1;
-        for (const alloc of sortedAllocations) {
-            const row = attendanceSheet.addRow({
-                sNo: sNo++,
-                rollNumber: alloc.roll_number || alloc.rollNumber || '',
-                studentName: alloc.student_name || alloc.studentName || '',
-                signature: ''  // Empty signature column
-            });
+        let row = 1;
 
-            // Style data row
-            const bgColor = sNo % 2 === 0 ? 'FFF8F9FA' : 'FFFFFFFF';
-            row.eachCell(cell => {
-                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgColor } };
-                cell.alignment = { horizontal: 'center', vertical: 'middle' };
-                cell.border = {
-                    top: { style: 'thin' }, bottom: { style: 'thin' },
-                    left: { style: 'thin' }, right: { style: 'thin' }
-                };
-            });
-            // Left-align student name
-            row.getCell(3).alignment = { horizontal: 'left', vertical: 'middle' };
-            row.height = 22;
+        // Row 1: Department name
+        ws.mergeCells(row, 1, row, COLS);
+        const deptCell = ws.getCell(row, 1);
+        deptCell.value = `Department of ${branchCode}`;
+        deptCell.font = { size: 11 };
+        deptCell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+        // Row 2: CIE Attendance Statement (not "Consolidated")
+        row++;
+        ws.mergeCells(row, 1, row, COLS);
+        const cieCell = ws.getCell(row, 1);
+        cieCell.value = 'Continuous Internal Assessment (CIE)-I Attendance Statement';
+        cieCell.font = { bold: true, size: 13 };
+        cieCell.alignment = { horizontal: 'center', vertical: 'middle' };
+        ws.getRow(row).height = 22;
+
+        // Row 3: Info table row 1 — Subject | (value) | Branch | BE(CSE) | Total Students
+        row++;
+        const infoStart = row;
+        ws.getCell(row, 1).value = 'Subject';
+        ws.getCell(row, 2).value = subjectName;
+        ws.getCell(row, 3).value = 'Branch';
+        ws.getCell(row, 4).value = `BE (${branchCode})`;
+        ws.getCell(row, 5).value = 'Total Students';
+
+        // Row 4: Time | value | (blank) | BE VII SEM | No of Students Present
+        row++;
+        ws.getCell(row, 1).value = 'Time';
+        ws.getCell(row, 2).value = timeSlot;
+        ws.getCell(row, 3).value = '';
+        ws.getCell(row, 4).value = semLabel ? `BE ${semLabel}` : '';
+        ws.getCell(row, 5).value = 'No of Students Present';
+
+        // Row 5: Date | value | Room No | (value) | No of Students Absent
+        row++;
+        ws.getCell(row, 1).value = 'Date';
+        ws.getCell(row, 2).value = examDate;
+        ws.getCell(row, 3).value = 'Room No';
+        ws.getCell(row, 4).value = roomCode;
+        ws.getCell(row, 5).value = 'No of Students Absent';
+
+        // Style info table
+        for (let r = infoStart; r <= row; r++) {
+            for (let c = 1; c <= COLS; c++) {
+                const cell = ws.getCell(r, c);
+                cell.border = thinBorder;
+                cell.alignment = { vertical: 'middle', wrapText: true };
+                if (c === 1 || c === 3 || c === 5) {
+                    cell.font = { bold: true, size: 11 };
+                } else {
+                    cell.font = { size: 11 };
+                }
+            }
         }
 
-        // Footer row with total count
-        const footerRowNum = attendanceSheet.rowCount + 1;
-        attendanceSheet.mergeCells(`A${footerRowNum}:C${footerRowNum}`);
-        const footerCell = attendanceSheet.getCell(`A${footerRowNum}`);
-        footerCell.value = `Total Students: ${sortedAllocations.length}`;
-        footerCell.font = { bold: true };
-        footerCell.alignment = { horizontal: 'right' };
-        footerCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E8E8' } };
-        footerCell.border = {
-            top: { style: 'thin' }, bottom: { style: 'thin' },
-            left: { style: 'thin' }, right: { style: 'thin' }
-        };
-        attendanceSheet.getCell(`D${footerRowNum}`).border = {
-            top: { style: 'thin' }, bottom: { style: 'thin' },
-            left: { style: 'thin' }, right: { style: 'thin' }
-        };
+        // Blank separator
+        row++;
+
+        // Table header: S.No | Roll No | Name | Sign
+        row++;
+        const tableStart = row;
+        const tableHeaders = ['S.No', 'Roll No', 'Name', 'Sign'];
+        const tableCols = [1, 2, 3, 4];
+        tableHeaders.forEach((h, i) => {
+            const cell = ws.getCell(row, tableCols[i]);
+            cell.value = h;
+            cell.font = { bold: true, size: 11 };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = thinBorder;
+        });
+
+        // Student rows
+        for (let i = 0; i < sortedAllocs.length; i++) {
+            row++;
+            const a = sortedAllocs[i];
+            const rollNo = a.roll_number || a.rollNumber || '';
+            const studentName = a.student_name || a.studentName || '';
+            ws.getCell(row, 1).value = i + 1;
+            ws.getCell(row, 2).value = rollNo;
+            ws.getCell(row, 3).value = studentName;
+            ws.getCell(row, 4).value = '';
+            for (let c = 1; c <= 4; c++) {
+                const cell = ws.getCell(row, c);
+                cell.border = thinBorder;
+                cell.font = { size: 10 };
+                cell.alignment = { horizontal: c === 3 ? 'left' : 'center', vertical: 'middle' };
+            }
+        }
+
+        // Total students row
+        row++;
+        ws.mergeCells(row, 1, row, 3);
+        ws.getCell(row, 1).value = `Total Students: ${totalStudents}`;
+        ws.getCell(row, 1).font = { bold: true, size: 11 };
+        ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+        ws.getCell(row, 4).value = '';
+        for (let c = 1; c <= 4; c++) {
+            ws.getCell(row, c).border = thinBorder;
+        }
+
+        // Invigilator signature section
+        row += 3;
+        ws.getCell(row, 1).value = 'Invigilator Signature:';
+        ws.getCell(row, 1).font = { bold: true, size: 11 };
+        ws.mergeCells(row, 2, row, 4);
+        ws.getCell(row, 2).border = { bottom: { style: 'thin' } };
+
+        row += 2;
+        ws.getCell(row, 1).value = 'Room No:';
+        ws.getCell(row, 1).font = { bold: true, size: 11 };
+        ws.getCell(row, 2).value = roomCode;
+        ws.getCell(row, 2).font = { size: 11 };
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  PER-BRANCH CONSOLIDATED SHEETS  (Roll number grid, all rooms combined)
+    // ══════════════════════════════════════════════════════════════════════════
+    // Group allocations by branch+subject (across all rooms)
+    const allocationsByBranch = {};
+    for (const a of allocations) {
+        const branchCode = a.branch_code || a.branchCode || 'Unknown';
+        const subjectName = a.subject_name || a.subjectName || 'Unknown';
+        const subjectCode = a.subject_code || a.subjectCode || '';
+        const key = `${branchCode}|||${subjectName}`;
+        if (!allocationsByBranch[key]) {
+            allocationsByBranch[key] = { branchCode, subjectName, subjectCode, allocations: [] };
+        }
+        allocationsByBranch[key].allocations.push(a);
+    }
+
+    const branchKeys = Object.keys(allocationsByBranch).sort();
+
+    for (const bKey of branchKeys) {
+        const { branchCode, subjectName, subjectCode, allocations: branchAllocs } = allocationsByBranch[bKey];
+
+        const sheetName = `${branchCode}-All`.substring(0, 31);
+        let finalSheetName = sheetName;
+        let counter = 2;
+        while (workbook.getWorksheet(finalSheetName)) {
+            const sfx = `-${counter}`;
+            finalSheetName = sheetName.substring(0, 31 - sfx.length) + sfx;
+            counter++;
+        }
+        const ws = workbook.addWorksheet(finalSheetName);
+
+        const ROLL_COLS = 5;
+        for (let c = 1; c <= ROLL_COLS; c++) {
+            ws.getColumn(c).width = 22;
+        }
+        ws.getColumn(6).width = 20;
+
+        const sortedAllocs = branchAllocs
+            .filter(a => a.roll_number || a.rollNumber)
+            .sort((a, b) => (a.roll_number || a.rollNumber || '').localeCompare(b.roll_number || b.rollNumber || ''));
+        const totalStudents = sortedAllocs.length;
+
+        let row = 1;
+
+        // Row 1: Department
+        ws.mergeCells(row, 1, row, ROLL_COLS);
+        ws.getCell(row, 1).value = `Department of ${branchCode}`;
+        ws.getCell(row, 1).font = { size: 11 };
+        ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        // Row 2: CIE Consolidated Attendance Statement
+        row++;
+        ws.mergeCells(row, 1, row, ROLL_COLS);
+        ws.getCell(row, 1).value = 'Continuous Internal Assessment (CIE)-I Consolidated Attendance Statement';
+        ws.getCell(row, 1).font = { bold: true, size: 13 };
+        ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+        ws.getRow(row).height = 22;
+
+        // Row 3: Info table (3 rows × 6 columns)
+        row++;
+        const ICOLS = 6;
+        const infoStart = row;
+        ws.getCell(row, 1).value = 'Subject';
+        ws.getCell(row, 2).value = subjectName;
+        ws.getCell(row, 3).value = 'Branch';
+        ws.getCell(row, 4).value = `BE(${branchCode})`;
+        ws.getCell(row, 5).value = 'Total Students';
+        ws.getCell(row, 6).value = totalStudents;
+
+        row++;
+        ws.getCell(row, 1).value = 'Time';
+        ws.getCell(row, 2).value = timeSlot;
+        ws.getCell(row, 3).value = '';
+        ws.getCell(row, 4).value = semLabel ? `BE ${semLabel}` : '';
+        ws.getCell(row, 5).value = 'No of Students Present';
+        ws.getCell(row, 6).value = '';
+
+        row++;
+        ws.getCell(row, 1).value = 'Date';
+        ws.getCell(row, 2).value = examDate;
+        ws.getCell(row, 3).value = 'Faculty';
+        ws.getCell(row, 4).value = '';
+        ws.getCell(row, 5).value = 'No of Students Absent';
+        ws.getCell(row, 6).value = '';
+
+        // Style info table
+        for (let r = infoStart; r <= row; r++) {
+            for (let c = 1; c <= ICOLS; c++) {
+                const cell = ws.getCell(r, c);
+                cell.border = thinBorder;
+                cell.alignment = { vertical: 'middle', wrapText: true };
+                if (c === 1 || c === 3 || c === 5) {
+                    cell.font = { bold: true, size: 11 };
+                } else {
+                    cell.font = { size: 11 };
+                }
+            }
+        }
+        ws.getCell(infoStart, 6).font = { bold: true, size: 11 };
+
+        // Blank separator
+        row++;
+
+        // "Total Roll Nos" header
+        row++;
+        ws.mergeCells(row, 1, row, ROLL_COLS);
+        const rollHeader = ws.getCell(row, 1);
+        rollHeader.value = 'Total Roll Nos';
+        rollHeader.font = { bold: true, size: 13 };
+        rollHeader.alignment = { horizontal: 'center', vertical: 'middle' };
+        rollHeader.border = thinBorder;
+        ws.getCell(row, ROLL_COLS).border = thinBorder;
+
+        // Roll numbers grid: 5 columns
+        const rollNumbers = sortedAllocs.map(a => a.roll_number || a.rollNumber || '');
+        for (let i = 0; i < rollNumbers.length; i += ROLL_COLS) {
+            row++;
+            const excelRow = ws.getRow(row);
+            for (let c = 0; c < ROLL_COLS; c++) {
+                const cell = excelRow.getCell(c + 1);
+                const idx = i + c;
+                cell.value = idx < rollNumbers.length ? rollNumbers[idx] : '';
+                cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                cell.border = thinBorder;
+                cell.font = { size: 10 };
+            }
+            excelRow.height = 20;
+        }
+
+        // Signature section
+        row += 3;
+        ws.getCell(row, 1).value = 'Faculty Signature:';
+        ws.getCell(row, 1).font = { bold: true, size: 11 };
+        ws.mergeCells(row, 2, row, 3);
+        ws.getCell(row, 2).border = { bottom: { style: 'thin' } };
+
+        ws.getCell(row, 4).value = 'HOD Signature:';
+        ws.getCell(row, 4).font = { bold: true, size: 11 };
+        ws.getCell(row, 5).border = { bottom: { style: 'thin' } };
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  MASTER SHEET: Room-wise Branch Participation Summary
+    // ══════════════════════════════════════════════════════════════════════════
+    if (sortedKeys.length > 0) {
+        const masterSheet = workbook.addWorksheet('Master Attendance');
+
+        masterSheet.mergeCells('A1:F1');
+        masterSheet.getCell('A1').value = 'MVSR Engineering College';
+        masterSheet.getCell('A1').font = { bold: true, size: 16 };
+        masterSheet.getCell('A1').alignment = { horizontal: 'center' };
+
+        masterSheet.mergeCells('A2:F2');
+        masterSheet.getCell('A2').value = 'CIE Consolidated Attendance — Room-wise Summary';
+        masterSheet.getCell('A2').font = { bold: true, size: 12 };
+        masterSheet.getCell('A2').alignment = { horizontal: 'center' };
+
+        masterSheet.mergeCells('A3:F3');
+        const infoText = [
+            examDate ? `Date: ${examDate}` : '',
+            timeSlot ? `Time: ${timeSlot}` : '',
+            semLabel ? `BE ${semLabel}` : '',
+            yearNum ? `Year ${yearNum}` : ''
+        ].filter(Boolean).join('   |   ');
+        masterSheet.getCell('A3').value = infoText;
+        masterSheet.getCell('A3').font = { size: 11 };
+        masterSheet.getCell('A3').alignment = { horizontal: 'center' };
+
+        const mTableRow = 5;
+        const mHeaders = ['S.No', 'Room', 'Branch', 'Subject', 'No. of Students', 'Roll Number Range'];
+        masterSheet.getColumn(1).width = 8;
+        masterSheet.getColumn(2).width = 14;
+        masterSheet.getColumn(3).width = 14;
+        masterSheet.getColumn(4).width = 30;
+        masterSheet.getColumn(5).width = 18;
+        masterSheet.getColumn(6).width = 35;
+
+        const headerRowM = masterSheet.getRow(mTableRow);
+        mHeaders.forEach((h, i) => {
+            const cell = headerRowM.getCell(i + 1);
+            cell.value = h;
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = thinBorder;
+        });
+
+        let mRow = mTableRow;
+        let sNo = 0;
+        let grandTotal = 0;
+
+        for (const key of sortedKeys) {
+            const { roomCode, branchCode, subjectName, allocations: ra } = allocationsByRoomBranch[key];
+            const sorted = ra
+                .filter(a => a.roll_number || a.rollNumber)
+                .sort((a, b) => (a.roll_number || a.rollNumber || '').localeCompare(b.roll_number || b.rollNumber || ''));
+            const count = sorted.length;
+            if (count === 0) continue;
+            sNo++;
+            grandTotal += count;
+
+            const firstRoll = sorted[0].roll_number || sorted[0].rollNumber || '';
+            const lastRoll = sorted[count - 1].roll_number || sorted[count - 1].rollNumber || '';
+            const rangeStr = firstRoll === lastRoll ? firstRoll : `${firstRoll} to ${lastRoll}`;
+
+            mRow++;
+            const dataRow = masterSheet.getRow(mRow);
+            dataRow.values = [sNo, roomCode, branchCode, subjectName, count, rangeStr];
+            const bgColor = sNo % 2 === 0 ? 'FFF8F9FA' : 'FFFFFFFF';
+            dataRow.eachCell((cell, colNum) => {
+                if (colNum > 6) return;
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgColor } };
+                cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                cell.border = thinBorder;
+                cell.font = { size: 10 };
+            });
+        }
+
+        mRow++;
+        const totalRowM = masterSheet.getRow(mRow);
+        masterSheet.mergeCells(mRow, 1, mRow, 4);
+        totalRowM.getCell(1).value = 'GRAND TOTAL';
+        totalRowM.getCell(1).font = { bold: true, size: 11 };
+        totalRowM.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' };
+        totalRowM.getCell(5).value = grandTotal;
+        totalRowM.getCell(5).font = { bold: true, size: 11 };
+        totalRowM.getCell(5).alignment = { horizontal: 'center' };
+        totalRowM.getCell(6).value = '';
+        for (let c = 1; c <= 6; c++) {
+            totalRowM.getCell(c).border = thinBorder;
+            totalRowM.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E8E8' } };
+        }
+
+        mRow += 3;
+        masterSheet.getCell(mRow, 1).value = 'Controller of Examinations:';
+        masterSheet.getCell(mRow, 1).font = { bold: true, size: 11 };
+        masterSheet.mergeCells(mRow, 2, mRow, 3);
+        masterSheet.getCell(mRow, 2).border = { bottom: { style: 'thin' } };
+
+        masterSheet.getCell(mRow, 4).value = 'Principal:';
+        masterSheet.getCell(mRow, 4).font = { bold: true, size: 11 };
+        masterSheet.mergeCells(mRow, 5, mRow, 6);
+        masterSheet.getCell(mRow, 5).border = { bottom: { style: 'thin' } };
     }
 
     // ── PER-ROOM GRID SHEETS ───────────────────────────────────

@@ -90,6 +90,69 @@ function initSchema(database) {
             database.exec("ALTER TABLE exam_sessions ADD COLUMN year INTEGER");
         }
     } catch (_) { /* column already exists */ }
+
+    // Migration: add time_slot column to exam_timetable if missing
+    try {
+        const ttCols = database.prepare("PRAGMA table_info(exam_timetable)").all();
+        if (!ttCols.find(c => c.name === 'time_slot')) {
+            database.exec("ALTER TABLE exam_timetable ADD COLUMN time_slot TEXT");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Migration: change exam_timetable UNIQUE constraint to include subject_id
+    // SQLite doesn't support ALTER CONSTRAINT, so we recreate the table if needed
+    try {
+        const idxInfo = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='exam_timetable'").get();
+        if (idxInfo && idxInfo.sql && idxInfo.sql.includes('UNIQUE(year, branch_id, exam_date, slot)') && !idxInfo.sql.includes('subject_id, exam_date')) {
+            database.exec(`
+                CREATE TABLE IF NOT EXISTS exam_timetable_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    year        INTEGER NOT NULL,
+                    branch_id   INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                    subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                    exam_date   TEXT    NOT NULL,
+                    slot        TEXT,
+                    time_slot   TEXT,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(year, branch_id, subject_id, exam_date, slot)
+                );
+                INSERT OR IGNORE INTO exam_timetable_new (id, year, branch_id, subject_id, exam_date, slot, created_at)
+                    SELECT id, year, branch_id, subject_id, exam_date, slot, created_at FROM exam_timetable;
+                DROP TABLE exam_timetable;
+                ALTER TABLE exam_timetable_new RENAME TO exam_timetable;
+                CREATE INDEX IF NOT EXISTS idx_exam_timetable_date ON exam_timetable(exam_date, slot);
+            `);
+        }
+    } catch (_) { /* migration already applied or table is new */ }
+
+    // Migration: add slot column to exam_sessions if missing
+    try {
+        const esCols2 = database.prepare("PRAGMA table_info(exam_sessions)").all();
+        if (!esCols2.find(c => c.name === 'slot')) {
+            database.exec("ALTER TABLE exam_sessions ADD COLUMN slot TEXT");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Migration: change session_branch_subjects UNIQUE constraint to (session_id, branch_id, subject_id)
+    // to allow multiple subjects per branch in one session (electives).
+    try {
+        const sbsInfo = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='session_branch_subjects'").get();
+        if (sbsInfo && sbsInfo.sql && sbsInfo.sql.includes('UNIQUE(session_id, branch_id)') && !sbsInfo.sql.includes('branch_id, subject_id)')) {
+            database.exec(`
+                CREATE TABLE IF NOT EXISTS session_branch_subjects_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id  INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+                    branch_id   INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                    subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                    UNIQUE(session_id, branch_id, subject_id)
+                );
+                INSERT OR IGNORE INTO session_branch_subjects_new (id, session_id, branch_id, subject_id)
+                    SELECT id, session_id, branch_id, subject_id FROM session_branch_subjects;
+                DROP TABLE session_branch_subjects;
+                ALTER TABLE session_branch_subjects_new RENAME TO session_branch_subjects;
+            `);
+        }
+    } catch (_) { /* migration already applied or table is new */ }
 }
 
 function closeDb() {

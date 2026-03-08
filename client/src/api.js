@@ -129,6 +129,17 @@ export const configApi = {
         if (slot) url += `&slot=${slot}`;
         return api(url);
     },
+    getTimetableDates: (year) => {
+        let url = '/config/timetable/dates';
+        if (year) url += `?year=${year}`;
+        return api(url);
+    },
+    getTimetableSlots: (date, year) => {
+        let url = `/config/timetable/slots?date=${date}`;
+        if (year) url += `&year=${year}`;
+        return api(url);
+    },
+    getTimetableYears: () => api('/config/timetable/years'),
     deleteTimetable: (year) =>
         api(`/config/timetable/${year}`, { method: 'DELETE' }),
 };

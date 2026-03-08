@@ -40,6 +40,9 @@ function autoDetectColumns(headers) {
         if (!mapping.slot && (name.includes('slot') || name.includes('session') || name === 'fn/an')) {
             mapping.slot = h.col;
         }
+        if (!mapping.time && (name === 'time' || name.includes('timing') || name.includes('time slot'))) {
+            mapping.time = h.col;
+        }
         if (!mapping.year && (name === 'year' || name === 'yr' || name.includes('academic year'))) {
             mapping.year = h.col;
         }
@@ -1703,7 +1706,8 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                     branch: row[mapping.branch] || '',
                     subjectCode: row[mapping.subjectCode] || '',
                     examDate: row[mapping.examDate] || '',
-                    slot: mapping.slot ? (row[mapping.slot] || '') : ''
+                    slot: mapping.slot ? (row[mapping.slot] || '') : '',
+                    time: mapping.time ? (row[mapping.time] || '') : ''
                 };
                 if (r.branch && r.subjectCode) rows.push(r);
             }
@@ -1726,7 +1730,8 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                     branch: mapping.branch,
                     subjectCode: mapping.subjectCode,
                     examDate: mapping.examDate,
-                    slot: mapping.slot || null
+                    slot: mapping.slot || null,
+                    time: mapping.time || null
                 },
                 sheetNames: selectedSheets,
                 headerRow: currentSheet ? currentSheet.headerRow : undefined,
@@ -1823,7 +1828,8 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                                         { key: 'branch', label: 'Branch *' },
                                         { key: 'subjectCode', label: 'Subject Code *' },
                                         { key: 'examDate', label: 'Exam Date *' },
-                                        { key: 'slot', label: 'Slot (FN/AN)' }
+                                        { key: 'slot', label: 'Slot (FN/AN)' },
+                                        { key: 'time', label: 'Time' }
                                     ].map(field => (
                                         <div className="form-group" key={field.key}>
                                             <label>{field.label}</label>
@@ -1904,6 +1910,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                                         {sheets && sheets.length > 1 && <th>Sheet</th>}
                                         <th>Date</th>
                                         <th>Slot</th>
+                                        <th>Time</th>
                                         <th>Branch</th>
                                         <th>Subject Code</th>
                                     </tr>
@@ -1914,6 +1921,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                                             {sheets && sheets.length > 1 && <td style={{ fontSize: 11 }}>{r.sheet}</td>}
                                             <td>{r.examDate}</td>
                                             <td>{r.slot || '\u2014'}</td>
+                                            <td>{r.time || '\u2014'}</td>
                                             <td>{r.branch}</td>
                                             <td>{r.subjectCode}</td>
                                         </tr>
@@ -1959,6 +1967,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                                 <tr>
                                     <th>Date</th>
                                     <th>Slot</th>
+                                    <th>Time</th>
                                     <th>Branch</th>
                                     <th>Subject Code</th>
                                     <th>Subject Name</th>
@@ -1969,6 +1978,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                                     <tr key={t.id}>
                                         <td>{t.exam_date}</td>
                                         <td>{t.slot || '\u2014'}</td>
+                                        <td>{t.time_slot || '\u2014'}</td>
                                         <td>{t.branch_code}</td>
                                         <td>{t.subject_code}</td>
                                         <td>{t.subject_name}</td>

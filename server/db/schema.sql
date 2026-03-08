@@ -80,8 +80,9 @@ CREATE TABLE IF NOT EXISTS exam_timetable (
     subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     exam_date   TEXT    NOT NULL,       -- ISO date
     slot        TEXT,                   -- e.g. "FN" (forenoon), "AN" (afternoon)
+    time_slot   TEXT,                   -- e.g. "10:00-11:10", "2:30-3:40"
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(year, branch_id, exam_date, slot)
+    UNIQUE(year, branch_id, subject_id, exam_date, slot)
 );
 
 -- -------------------------------------------------------
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS exam_sessions (
     exam_date     TEXT    NOT NULL,                 -- ISO date
     start_time    TEXT,                             -- HH:MM
     end_time      TEXT,
+    slot          TEXT,                             -- time slot e.g. "10:00-11:10"
     year          INTEGER,                          -- academic year (1-4)
     seating_mode       TEXT NOT NULL DEFAULT 'SINGLE'       CHECK (seating_mode IN ('SINGLE','DOUBLE')),
     allocation_method  TEXT NOT NULL DEFAULT 'LINEAR'       CHECK (allocation_method IN ('INTERLEAVED','LINEAR')),
@@ -112,7 +114,8 @@ CREATE TABLE IF NOT EXISTS session_rooms (
 
 -- -------------------------------------------------------
 -- 6. SESSION ↔ BRANCH ↔ SUBJECT mapping
---    Each branch has exactly ONE subject per session.
+--    A branch may map to MULTIPLE subjects in one session
+--    (e.g. electives: some CSE students take PE-1, others PE-2).
 --    Now auto-populated from year_branch_subjects + exam_timetable.
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS session_branch_subjects (
@@ -120,7 +123,7 @@ CREATE TABLE IF NOT EXISTS session_branch_subjects (
     session_id  INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
     branch_id   INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
     subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
-    UNIQUE(session_id, branch_id)
+    UNIQUE(session_id, branch_id, subject_id)
 );
 
 -- -------------------------------------------------------
