@@ -28,6 +28,9 @@ function autoDetectColumns(headers) {
         if (!mapping.studentName && (name.includes('name of the student') || name.includes('student name') || name === 'name')) {
             mapping.studentName = h.col;
         }
+        if (!mapping.section && (name === 'section' || name === 'sec' || name.includes('section'))) {
+            mapping.section = h.col;
+        }
         if (!mapping.subjectCode && (name.includes('subject code') || name.includes('sub code') || name.includes('subcode'))) {
             mapping.subjectCode = h.col;
         }
@@ -304,7 +307,8 @@ function StudentImportTab({ allBranches, onError, onSuccess, clearMessages }) {
                     sheet: s.name,
                     rollNumber: row[mapping.rollNumber] || '',
                     studentName: mapping.studentName ? (row[mapping.studentName] || '') : '',
-                    branch: mapping.branch ? (row[mapping.branch] || '') : ''
+                    branch: mapping.branch ? (row[mapping.branch] || '') : '',
+                    section: mapping.section ? (row[mapping.section] || '') : ''
                 });
                 const code = extractAdmissionCode(row[mapping.rollNumber]);
                 if (code) codes.add(code);
@@ -352,7 +356,8 @@ function StudentImportTab({ allBranches, onError, onSuccess, clearMessages }) {
                 columnMapping: {
                     rollNumber: mapping.rollNumber,
                     studentName: mapping.studentName || null,
-                    branch: mapping.branch || null
+                    branch: mapping.branch || null,
+                    section: mapping.section || null
                 },
                 sheetNames: selectedSheets,
                 headerRow: currentSheet ? currentSheet.headerRow : undefined,
@@ -438,11 +443,12 @@ function StudentImportTab({ allBranches, onError, onSuccess, clearMessages }) {
                                     {mapping.rollNumber && <span style={{ color: '#2e7d32' }}> &#10003; Auto-mapped columns detected.</span>}
                                 </p>
 
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
                                     {[
                                         { key: 'rollNumber', label: 'Roll Number *' },
                                         { key: 'studentName', label: 'Student Name' },
-                                        { key: 'branch', label: 'Branch' }
+                                        { key: 'branch', label: 'Branch' },
+                                        { key: 'section', label: 'Section' }
                                     ].map(field => (
                                         <div className="form-group" key={field.key}>
                                             <label>{field.label}</label>
@@ -590,6 +596,7 @@ function StudentImportTab({ allBranches, onError, onSuccess, clearMessages }) {
                                         <th>Roll Number</th>
                                         <th>Student Name</th>
                                         <th>Branch</th>
+                                        <th>Section</th>
                                         <th>Admission Code</th>
                                         <th>&#8594; Academic Year</th>
                                     </tr>
@@ -604,6 +611,7 @@ function StudentImportTab({ allBranches, onError, onSuccess, clearMessages }) {
                                                 <td><strong>{row.rollNumber}</strong></td>
                                                 <td>{row.studentName}</td>
                                                 <td>{row.branch}</td>
+                                                <td>{row.section}</td>
                                                 <td>{code ? '20' + code : '\u2014'}</td>
                                                 <td>
                                                     {yr ? (

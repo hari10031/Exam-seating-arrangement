@@ -58,6 +58,9 @@ async function generatePDF({ sessionName, mode, roomGrids, report, roomSummary =
         });
 
         // ── COVER PAGE ───────────────────────────────────────────
+        doc.fontSize(18).font('Helvetica-Bold')
+            .text('MVSE Engineering College', { align: 'center' });
+        doc.moveDown(0.5);
         doc.fontSize(24).font('Helvetica-Bold')
             .text('EXAM SEATING ARRANGEMENT', { align: 'center' });
         doc.moveDown(0.5);

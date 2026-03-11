@@ -113,7 +113,8 @@ const ExamSessionModel = {
     getBranchSubjects(sessionId) {
         const db = getDb();
         return db.prepare(`
-      SELECT sbs.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name,
+      SELECT sbs.*, b.branch_code, b.branch_name, b.section as branch_section,
+             s.subject_code, s.subject_name,
              ybs.subject_type
       FROM session_branch_subjects sbs
       JOIN branches b ON b.id = sbs.branch_id
@@ -122,7 +123,7 @@ const ExamSessionModel = {
       LEFT JOIN year_branch_subjects ybs
         ON ybs.year = es.year AND ybs.branch_id = sbs.branch_id AND ybs.subject_id = sbs.subject_id
       WHERE sbs.session_id = ?
-      ORDER BY b.branch_code
+      ORDER BY b.branch_code, b.section
     `).all(sessionId);
     },
 
@@ -161,10 +162,16 @@ const ExamSessionModel = {
       INSERT OR IGNORE INTO students (session_id, branch_id, subject_id, roll_number, student_name)
       VALUES (?, ?, ?, ?, ?)
     `);
-        // Lookup student names from student_master
-        const lookupName = db.prepare(
-            'SELECT student_name FROM student_master WHERE roll_number = ?'
+        // Lookup student details (name + section) from student_master
+        const lookupMaster = db.prepare(
+            'SELECT student_name, section, branch_code FROM student_master WHERE roll_number = ?'
         );
+        // Find section-specific branch
+        const lookupSectionBranch = db.prepare(
+            'SELECT id FROM branches WHERE branch_code = ? AND section = ?'
+        );
+        // Cache section branch lookups
+        const sectionBranchCache = {};
 
         const txn = db.transaction(() => {
             for (const entry of entries) {
@@ -181,9 +188,23 @@ const ExamSessionModel = {
                 }
 
                 for (const roll of rolls) {
-                    const master = lookupName.get(roll);
+                    const master = lookupMaster.get(roll);
                     const name = master ? master.student_name : null;
-                    ins.run(sessionId, entry.branchId, entry.subjectId, roll, name);
+
+                    // Resolve section-specific branch_id if student has a section
+                    let branchId = entry.branchId;
+                    if (master && master.section) {
+                        const cacheKey = `${master.branch_code}::${master.section}`;
+                        if (sectionBranchCache[cacheKey] === undefined) {
+                            const secBranch = lookupSectionBranch.get(master.branch_code, master.section);
+                            sectionBranchCache[cacheKey] = secBranch ? secBranch.id : null;
+                        }
+                        if (sectionBranchCache[cacheKey] !== null) {
+                            branchId = sectionBranchCache[cacheKey];
+                        }
+                    }
+
+                    ins.run(sessionId, branchId, entry.subjectId, roll, name);
                 }
             }
         });
@@ -193,12 +214,12 @@ const ExamSessionModel = {
     getStudents(sessionId) {
         const db = getDb();
         return db.prepare(`
-      SELECT st.*, b.branch_code, s.subject_name
+      SELECT st.*, b.branch_code, b.section as branch_section, s.subject_name
       FROM students st
       JOIN branches b ON b.id = st.branch_id
       JOIN subjects s ON s.id = st.subject_id
       WHERE st.session_id = ?
-      ORDER BY b.branch_code, st.roll_number
+      ORDER BY b.branch_code, b.section, st.roll_number
     `).all(sessionId);
     },
 

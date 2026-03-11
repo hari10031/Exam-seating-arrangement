@@ -45,6 +45,7 @@ export default function SessionDetail() {
                 branchId: bs.branch_id, subjectId: bs.subject_id,
                 branchCode: bs.branch_code, subjectName: bs.subject_name,
                 subjectCode: bs.subject_code, subjectType: bs.subject_type,
+                branchSection: bs.branch_section || '',
                 year: data.year
             })));
             // Group saved students by branch+subject
@@ -66,7 +67,7 @@ export default function SessionDetail() {
                     return {
                         branchId: bs.branch_id, subjectId: bs.subject_id,
                         branchCode: bs.branch_code, subjectName: bs.subject_name,
-                        subjectType: bs.subject_type,
+                        subjectType: bs.subject_type, branchSection: bs.branch_section || '',
                         excludeStr: '', includeStr: '',
                         savedCount: saved ? saved.rolls.length : 0, useDb: true,
                         year: data.year || ''
@@ -121,7 +122,8 @@ export default function SessionDetail() {
                     subjectName: e.subject_name,
                     subjectCode: e.subject_code,
                     year: e.year,
-                    subjectType: e.subject_type
+                    subjectType: e.subject_type,
+                    branchSection: e.branch_section || ''
                 }));
                 setTimetableMappings(mappings);
                 if (mappings.length > 0) {
@@ -161,7 +163,7 @@ export default function SessionDetail() {
                 setTimetableLoaded(true);
             })
             .catch(() => setTimetableLoaded(true));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        // eslint-disable-next-line
     }, [session?.exam_date, session?.slot, session?.year, session?.branchSubjects?.length]);
 
     // Load configured years once
@@ -236,7 +238,8 @@ export default function SessionDetail() {
         setBranchSubjectMappings(prev => [...prev, {
             branchId: currentPickerBranch.id, subjectId: subject.subject_id,
             branchCode: currentPickerBranch.branch_code, subjectName: subject.subject_name,
-            subjectCode: subject.subject_code, year: pickerYear
+            subjectCode: subject.subject_code, branchSection: currentPickerBranch.section || '',
+            year: pickerYear
         }]);
         setPickerSubjectId('');
     };
@@ -277,7 +280,7 @@ export default function SessionDetail() {
             entries.push({
                 branchId: m.branchId, subjectId: m.subjectId,
                 branchCode: m.branchCode || '', subjectName: m.subjectName || '',
-                subjectType: m.subjectType || '',
+                subjectType: m.subjectType || '', branchSection: m.branchSection || '',
                 excludeStr: '', includeStr: '',
                 savedCount: 0, useDb: true, year: m.year || year
             });
@@ -425,12 +428,14 @@ export default function SessionDetail() {
     const currentPickerSubs = pickerBranchId ? (pickerSubjects[pickerBranchId] || []) : [];
     const currentPickerBranch = pickerBranches.find(b => b.id === Number(pickerBranchId));
 
-    // Group selected mappings by branch for display
+    // Group selected mappings by branch+section for display
     const selectedByBranch = {};
     branchSubjectMappings.forEach(m => {
         const bCode = m.branchCode || allBranches.find(b => b.id === Number(m.branchId))?.branch_code || `Branch ${m.branchId}`;
-        if (!selectedByBranch[bCode]) selectedByBranch[bCode] = [];
-        selectedByBranch[bCode].push(m);
+        const sec = m.branchSection || allBranches.find(b => b.id === Number(m.branchId))?.section || '';
+        const label = sec ? `${bCode} - ${sec}` : bCode;
+        if (!selectedByBranch[label]) selectedByBranch[label] = [];
+        selectedByBranch[label].push(m);
     });
 
     return (
@@ -542,7 +547,7 @@ export default function SessionDetail() {
                                     <select value={pickerBranchId} onChange={e => setPickerBranchId(e.target.value)} disabled={!pickerYear}>
                                         <option value="">— Select Branch —</option>
                                         {pickerBranches.map(b => (
-                                            <option key={b.id} value={b.id}>{b.branch_code} — {b.branch_name}</option>
+                                            <option key={b.id} value={b.id}>{b.branch_code}{b.section ? ` (${b.section})` : ''} — {b.branch_name}</option>
                                         ))}
                                     </select>
                                 </div>
@@ -558,7 +563,7 @@ export default function SessionDetail() {
                                         fontWeight: 700, fontSize: 14, color: '#1a73e8', marginBottom: 8,
                                         borderBottom: '2px solid #1a73e8', paddingBottom: 4
                                     }}>
-                                        Year {pickerYear} — {currentPickerBranch.branch_code} — {currentPickerBranch.branch_name}
+                                        Year {pickerYear} — {currentPickerBranch.branch_code}{currentPickerBranch.section ? ` (${currentPickerBranch.section})` : ''} — {currentPickerBranch.branch_name}
                                         <span style={{ fontWeight: 400, color: '#666', fontSize: 12, marginLeft: 8 }}>
                                             ({currentPickerSubs.length} subjects)
                                         </span>
@@ -706,7 +711,7 @@ export default function SessionDetail() {
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                                         <div>
                                             <strong style={{ color: '#1a73e8' }}>
-                                                {entry.branchCode || `Branch ${entry.branchId}`}
+                                                {entry.branchCode || `Branch ${entry.branchId}`}{entry.branchSection ? ` - ${entry.branchSection}` : ''}
                                             </strong>
                                             <span style={{ margin: '0 6px', color: '#999' }}>→</span>
                                             <strong>{entry.subjectName || `Subject ${entry.subjectId}`}</strong>
@@ -768,13 +773,14 @@ export default function SessionDetail() {
                             <div className="table-wrapper" style={{ maxHeight: 300, overflowY: 'auto' }}>
                                 <table>
                                     <thead>
-                                        <tr><th>Roll</th><th>Branch</th><th>Subject</th></tr>
+                                        <tr><th>Roll</th><th>Branch</th><th>Section</th><th>Subject</th></tr>
                                     </thead>
                                     <tbody>
                                         {session.students.map(s => (
                                             <tr key={s.id}>
                                                 <td><strong>{s.roll_number}</strong></td>
                                                 <td>{s.branch_code}</td>
+                                                <td>{s.branch_section || '—'}</td>
                                                 <td>{s.subject_name}</td>
                                             </tr>
                                         ))}

@@ -22,9 +22,11 @@ CREATE TABLE IF NOT EXISTS rooms (
 -- -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS branches (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    branch_code TEXT    NOT NULL UNIQUE,           -- e.g. "CSE"
+    branch_code TEXT    NOT NULL,                   -- e.g. "CSE"
     branch_name TEXT    NOT NULL,                  -- e.g. "Computer Science & Engineering"
-    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    section     TEXT    NOT NULL DEFAULT '',        -- e.g. "A", "B", or '' for no section
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(branch_code, section)
 );
 
 -- -------------------------------------------------------
@@ -152,7 +154,9 @@ CREATE TABLE IF NOT EXISTS seat_allocations (
     seat_position   TEXT    NOT NULL CHECK (seat_position IN ('A','B')),  -- A=left, B=right
     student_id      INTEGER REFERENCES students(id) ON DELETE SET NULL,
     roll_number     TEXT,
+    student_name    TEXT,
     branch_code     TEXT,
+    branch_section  TEXT    DEFAULT '',  -- section label (A, B, etc.)
     subject_name    TEXT,
     UNIQUE(session_id, room_id, row_number, column_number, seat_position)
 );

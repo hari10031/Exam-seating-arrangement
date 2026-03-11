@@ -2,16 +2,17 @@
  * BRANCH MODEL
  * ============
  * CRUD for academic branches (CSE, CSIT, CSE AI/ML, etc.)
+ * Each branch can have a section (A, B, C...) for separate allocation groups.
  */
 const { getDb } = require('../db/connection');
 
 const BranchModel = {
-    create({ branchCode, branchName }) {
+    create({ branchCode, branchName, section }) {
         const db = getDb();
         const stmt = db.prepare(`
-      INSERT INTO branches (branch_code, branch_name) VALUES (?, ?)
+      INSERT INTO branches (branch_code, branch_name, section) VALUES (?, ?, ?)
     `);
-        const result = stmt.run(branchCode, branchName);
+        const result = stmt.run(branchCode, branchName, section || '');
         return this.getById(result.lastInsertRowid);
     },
 
@@ -20,20 +21,23 @@ const BranchModel = {
         return db.prepare('SELECT * FROM branches WHERE id = ?').get(id);
     },
 
-    getByCode(branchCode) {
+    getByCode(branchCode, section) {
         const db = getDb();
+        if (section !== undefined && section !== null) {
+            return db.prepare('SELECT * FROM branches WHERE branch_code = ? AND section = ?').get(branchCode, section);
+        }
         return db.prepare('SELECT * FROM branches WHERE branch_code = ?').get(branchCode);
     },
 
     getAll() {
         const db = getDb();
-        return db.prepare('SELECT * FROM branches ORDER BY branch_code').all();
+        return db.prepare('SELECT * FROM branches ORDER BY branch_code, section').all();
     },
 
-    update(id, { branchCode, branchName }) {
+    update(id, { branchCode, branchName, section }) {
         const db = getDb();
-        db.prepare('UPDATE branches SET branch_code = ?, branch_name = ? WHERE id = ?')
-            .run(branchCode, branchName, id);
+        db.prepare('UPDATE branches SET branch_code = ?, branch_name = ?, section = ? WHERE id = ?')
+            .run(branchCode, branchName, section || '', id);
         return this.getById(id);
     },
 

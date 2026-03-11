@@ -14,8 +14,8 @@ const AllocationModel = {
         const db = getDb();
         const ins = db.prepare(`
       INSERT OR REPLACE INTO seat_allocations
-        (session_id, room_id, row_number, column_number, seat_position, student_id, roll_number, branch_code, subject_name)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (session_id, room_id, row_number, column_number, seat_position, student_id, roll_number, student_name, branch_code, branch_section, subject_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
         const txn = db.transaction(() => {
             for (const a of allocations) {
@@ -27,7 +27,9 @@ const AllocationModel = {
                     a.seatPosition,
                     a.studentId || null,
                     a.rollNumber || null,
+                    a.studentName || null,
                     a.branchCode || null,
+                    a.branchSection || '',
                     a.subjectName || null
                 );
             }
@@ -43,11 +45,13 @@ const AllocationModel = {
         const db = getDb();
         return db.prepare(`
       SELECT sa.*, r.room_code, 
-             COALESCE(st.student_name, sm.student_name) as student_name
+             COALESCE(sa.student_name, st.student_name, sm.student_name) as student_name,
+             b.section as branch_section_lookup
       FROM seat_allocations sa
       JOIN rooms r ON r.id = sa.room_id
       LEFT JOIN students st ON st.id = sa.student_id
       LEFT JOIN student_master sm ON sm.roll_number = sa.roll_number
+      LEFT JOIN branches b ON b.branch_code = sa.branch_code AND (sa.branch_section = '' OR b.section = sa.branch_section)
       WHERE sa.session_id = ?
       ORDER BY r.room_code, sa.row_number, sa.column_number, sa.seat_position
     `).all(sessionId);

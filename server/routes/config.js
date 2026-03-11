@@ -151,11 +151,12 @@ router.post('/students/import', async (req, res) => {
         }
 
         const upsert = db.prepare(`
-            INSERT INTO student_master (roll_number, student_name, branch_code, year, source_file)
-            VALUES (?, ?, ?, ?, 'xlsx-import')
+            INSERT INTO student_master (roll_number, student_name, branch_code, section, year, source_file)
+            VALUES (?, ?, ?, ?, ?, 'xlsx-import')
             ON CONFLICT(roll_number) DO UPDATE SET
                 student_name = excluded.student_name,
                 branch_code = excluded.branch_code,
+                section = excluded.section,
                 year = excluded.year
         `);
 
@@ -177,6 +178,8 @@ router.post('/students/import', async (req, res) => {
                     ? String(row.getCell(columnMapping.studentName).value || '').trim() : null;
                 const branchRaw = columnMapping.branch
                     ? String(row.getCell(columnMapping.branch).value || '').trim() : null;
+                const sectionRaw = columnMapping.section
+                    ? String(row.getCell(columnMapping.section).value || '').trim() : '';
 
                 // Validate roll number
                 if (!rollNumber || rollNumber.length < 3 || !/\d/.test(rollNumber)) return;
@@ -199,7 +202,7 @@ router.post('/students/import', async (req, res) => {
                     academicYear = Number(year);
                 }
 
-                // Handle branch
+                // Handle branch — create base branch AND section-specific branch
                 let branchCode = branchRaw;
                 if (branchRaw && createMissingBranches) {
                     const key = branchRaw.toUpperCase();
@@ -213,10 +216,29 @@ router.post('/students/import', async (req, res) => {
                             result.createdBranches.push(branchRaw);
                         } catch (_) { /* ignore duplicates */ }
                     }
+                    // Also create section-specific branch if section is provided
+                    if (sectionRaw) {
+                        const secKey = `${branchRaw.toUpperCase()}::${sectionRaw.toUpperCase()}`;
+                        if (!branchLookup[secKey]) {
+                            try {
+                                const secBranch = BranchModel.create({
+                                    branchCode: branchRaw,
+                                    branchName: branchRaw,
+                                    section: sectionRaw
+                                });
+                                branchLookup[secKey] = secBranch;
+                                result.createdBranches.push(`${branchRaw}-${sectionRaw}`);
+                            } catch (_) {
+                                // May already exist — look it up
+                                const existing = BranchModel.getByCode(branchRaw, sectionRaw);
+                                if (existing) branchLookup[secKey] = existing;
+                            }
+                        }
+                    }
                 }
 
                 try {
-                    upsert.run(rollNumber, studentName, branchCode, academicYear);
+                    upsert.run(rollNumber, studentName, branchCode, sectionRaw, academicYear);
                     result.imported++;
                     // Track year breakdown
                     result.yearBreakdown[academicYear] = (result.yearBreakdown[academicYear] || 0) + 1;
@@ -269,13 +291,15 @@ router.get('/students', (req, res) => {
         const db = getDb();
 
         let branchCode = branch;
+        let section;
         if (!branchCode && branchId) {
-            const row = db.prepare('SELECT branch_code FROM branches WHERE id = ?').get(Number(branchId));
+            const row = db.prepare('SELECT branch_code, section FROM branches WHERE id = ?').get(Number(branchId));
             branchCode = row ? row.branch_code : null;
+            section = row ? row.section : undefined;
         }
 
         if (year && branchCode) {
-            res.json(ConfigurationModel.getRollNumbers(Number(year), branchCode));
+            res.json(ConfigurationModel.getRollNumbers(Number(year), branchCode, section));
         } else if (year) {
             res.json(ConfigurationModel.getStudentsByYear(Number(year)));
         } else {
@@ -352,9 +376,12 @@ router.post('/year-subjects/import', async (req, res) => {
         const db = getDb();
         const result = { imported: 0, skipped: 0, errors: [], createdSubjects: [], createdBranches: [], yearBreakdown: {} };
 
+        // Map branch_code → array of all branch rows (one per section)
         const branchLookup = {};
         BranchModel.getAll().forEach(b => {
-            branchLookup[b.branch_code.toUpperCase()] = b;
+            const key = b.branch_code.toUpperCase();
+            if (!branchLookup[key]) branchLookup[key] = [];
+            branchLookup[key].push(b);
         });
 
         const subjectLookup = {};
@@ -447,18 +474,20 @@ router.post('/year-subjects/import', async (req, res) => {
 
                 if (!branchRaw || (!subjectCode && !subjectName)) return;
 
-                // Resolve or create branch
-                let branch = branchLookup[branchRaw.toUpperCase()];
-                if (!branch && createMissing) {
+                // Resolve or create branch — get ALL sections for this branch_code
+                let branches = branchLookup[branchRaw.toUpperCase()];
+                if ((!branches || branches.length === 0) && createMissing) {
                     try {
-                        branch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
-                        branchLookup[branchRaw.toUpperCase()] = branch;
+                        const newBranch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
+                        branchLookup[branchRaw.toUpperCase()] = [newBranch];
+                        branches = [newBranch];
                         result.createdBranches.push(branchRaw);
                     } catch (_) {
-                        branch = BranchModel.getByCode(branchRaw);
+                        const existing = BranchModel.getByCode(branchRaw);
+                        if (existing) branches = [existing];
                     }
                 }
-                if (!branch) {
+                if (!branches || branches.length === 0) {
                     result.skipped++;
                     result.errors.push({ subjectCode, reason: `Unknown branch: ${branchRaw}` });
                     return;
@@ -521,7 +550,10 @@ router.post('/year-subjects/import', async (req, res) => {
 
                 const validType = ['REGULAR', 'PE', 'OE'].includes(subjectType) ? subjectType : 'REGULAR';
                 if (!mappingsByYear[rowYear]) mappingsByYear[rowYear] = [];
-                mappingsByYear[rowYear].push({ branchId: branch.id, subjectId: subject.id, subjectType: validType });
+                // Create mapping for EACH section of this branch
+                for (const branch of branches) {
+                    mappingsByYear[rowYear].push({ branchId: branch.id, subjectId: subject.id, subjectType: validType });
+                }
                 result.imported++;
                 result.yearBreakdown[rowYear] = (result.yearBreakdown[rowYear] || 0) + 1;
             });
@@ -821,8 +853,13 @@ router.post('/timetable/import', async (req, res) => {
 
         const result = { imported: 0, skipped: 0, errors: [] };
 
+        // Map branch_code → array of all branch rows (one per section)
         const branchLookup = {};
-        BranchModel.getAll().forEach(b => { branchLookup[b.branch_code.toUpperCase()] = b; });
+        BranchModel.getAll().forEach(b => {
+            const key = b.branch_code.toUpperCase();
+            if (!branchLookup[key]) branchLookup[key] = [];
+            branchLookup[key].push(b);
+        });
         const subjectLookup = {};
         const subjectNameLookup = {};
         const subjectNormalizedLookup = {};
@@ -872,17 +909,19 @@ router.post('/timetable/import', async (req, res) => {
                     examDate = String(examDate).trim();
                 }
 
-                // Resolve branch
-                let branch = branchLookup[branchRaw.toUpperCase()];
-                if (!branch && createMissing) {
+                // Resolve branch — get ALL sections for this branch_code
+                let branches = branchLookup[branchRaw.toUpperCase()];
+                if ((!branches || branches.length === 0) && createMissing) {
                     try {
-                        branch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
-                        branchLookup[branchRaw.toUpperCase()] = branch;
+                        const newBranch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
+                        branchLookup[branchRaw.toUpperCase()] = [newBranch];
+                        branches = [newBranch];
                     } catch (_) {
-                        branch = BranchModel.getByCode(branchRaw);
+                        const existing = BranchModel.getByCode(branchRaw);
+                        if (existing) branches = [existing];
                     }
                 }
-                if (!branch) {
+                if (!branches || branches.length === 0) {
                     result.skipped++;
                     result.errors.push({ subjectCode, reason: `Unknown branch: ${branchRaw}` });
                     return;
@@ -907,14 +946,17 @@ router.post('/timetable/import', async (req, res) => {
                     return;
                 }
 
-                entries.push({
-                    year: Number(year),
-                    branchId: branch.id,
-                    subjectId: subject.id,
-                    examDate,
-                    slot,
-                    timeSlot
-                });
+                // Create timetable entry for EACH section of this branch
+                for (const branch of branches) {
+                    entries.push({
+                        year: Number(year),
+                        branchId: branch.id,
+                        subjectId: subject.id,
+                        examDate,
+                        slot,
+                        timeSlot
+                    });
+                }
                 result.imported++;
             });
         };

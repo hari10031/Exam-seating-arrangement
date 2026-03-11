@@ -30,15 +30,15 @@ router.get('/:id', (req, res) => {
 // POST /api/branches
 router.post('/', (req, res) => {
     try {
-        const { branchCode, branchName } = req.body;
+        const { branchCode, branchName, section } = req.body;
         if (!branchCode || !branchName) {
             return res.status(400).json({ error: 'branchCode and branchName are required' });
         }
-        const branch = BranchModel.create({ branchCode, branchName });
+        const branch = BranchModel.create({ branchCode, branchName, section });
         res.status(201).json(branch);
     } catch (err) {
         if (err.message.includes('UNIQUE')) {
-            return res.status(409).json({ error: 'Branch code already exists' });
+            return res.status(409).json({ error: 'Branch code with this section already exists' });
         }
         res.status(500).json({ error: err.message });
     }
@@ -47,8 +47,8 @@ router.post('/', (req, res) => {
 // PUT /api/branches/:id
 router.put('/:id', (req, res) => {
     try {
-        const { branchCode, branchName } = req.body;
-        const branch = BranchModel.update(Number(req.params.id), { branchCode, branchName });
+        const { branchCode, branchName, section } = req.body;
+        const branch = BranchModel.update(Number(req.params.id), { branchCode, branchName, section });
         res.json(branch);
     } catch (err) {
         res.status(500).json({ error: err.message });

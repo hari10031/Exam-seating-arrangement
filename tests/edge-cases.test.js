@@ -623,6 +623,20 @@ describe('groupByBranch', () => {
         expect(groups['CSE']).toHaveLength(2);
         expect(groups['CSIT']).toHaveLength(1);
     });
+
+    test('groups by branch+section when section exists', () => {
+        const students = [
+            { ...makeStudent(1, '101', 'CSE', 'DS'), branch_section: 'A' },
+            { ...makeStudent(2, '102', 'CSE', 'DS'), branch_section: 'B' },
+            { ...makeStudent(3, '103', 'CSE', 'DS'), branch_section: 'A' },
+            { ...makeStudent(4, '201', 'CSIT', 'SPM') },
+        ];
+        const groups = groupByBranch(students);
+        expect(Object.keys(groups)).toHaveLength(3);
+        expect(groups['CSE-A']).toHaveLength(2);
+        expect(groups['CSE-B']).toHaveLength(1);
+        expect(groups['CSIT']).toHaveLength(1);
+    });
 });
 
 // ═══════════════════════════════════════════════════════════════

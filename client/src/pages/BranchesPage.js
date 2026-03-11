@@ -3,7 +3,7 @@ import { branchesApi } from '../api';
 
 export default function BranchesPage() {
     const [branches, setBranches] = useState([]);
-    const [form, setForm] = useState({ branchCode: '', branchName: '' });
+    const [form, setForm] = useState({ branchCode: '', branchName: '', section: '' });
     const [editing, setEditing] = useState(null);
     const [error, setError] = useState('');
 
@@ -19,7 +19,7 @@ export default function BranchesPage() {
             } else {
                 await branchesApi.create(form);
             }
-            setForm({ branchCode: '', branchName: '' });
+            setForm({ branchCode: '', branchName: '', section: '' });
             setEditing(null);
             load();
         } catch (err) {
@@ -29,7 +29,7 @@ export default function BranchesPage() {
 
     const handleEdit = (b) => {
         setEditing(b.id);
-        setForm({ branchCode: b.branch_code, branchName: b.branch_name });
+        setForm({ branchCode: b.branch_code, branchName: b.branch_name, section: b.section || '' });
     };
 
     const handleDelete = async (id) => {
@@ -57,12 +57,17 @@ export default function BranchesPage() {
                             <input value={form.branchName} onChange={e => setForm({ ...form, branchName: e.target.value })}
                                 placeholder="e.g. Computer Science & Engineering" required />
                         </div>
+                        <div className="form-group">
+                            <label>Section</label>
+                            <input value={form.section} onChange={e => setForm({ ...form, section: e.target.value })}
+                                placeholder="e.g. A, B (optional)" />
+                        </div>
                     </div>
                     <div className="btn-group">
                         <button className="btn btn-primary" type="submit">{editing ? 'Update' : 'Add Branch'}</button>
                         {editing && (
                             <button className="btn btn-outline" type="button"
-                                onClick={() => { setEditing(null); setForm({ branchCode: '', branchName: '' }); }}>Cancel</button>
+                                onClick={() => { setEditing(null); setForm({ branchCode: '', branchName: '', section: '' }); }}>Cancel</button>
                         )}
                     </div>
                 </form>
@@ -73,13 +78,14 @@ export default function BranchesPage() {
                 <div className="table-wrapper">
                     <table>
                         <thead>
-                            <tr><th>Code</th><th>Name</th><th>Actions</th></tr>
+                            <tr><th>Code</th><th>Name</th><th>Section</th><th>Actions</th></tr>
                         </thead>
                         <tbody>
                             {branches.map(b => (
                                 <tr key={b.id}>
                                     <td><strong>{b.branch_code}</strong></td>
                                     <td>{b.branch_name}</td>
+                                    <td>{b.section || '—'}</td>
                                     <td>
                                         <button className="btn btn-outline btn-sm" onClick={() => handleEdit(b)}>Edit</button>{' '}
                                         <button className="btn btn-danger btn-sm" onClick={() => handleDelete(b.id)}>Delete</button>
@@ -87,7 +93,7 @@ export default function BranchesPage() {
                                 </tr>
                             ))}
                             {branches.length === 0 && (
-                                <tr><td colSpan="3" style={{ textAlign: 'center', color: '#999' }}>No branches yet</td></tr>
+                                <tr><td colSpan="4" style={{ textAlign: 'center', color: '#999' }}>No branches yet</td></tr>
                             )}
                         </tbody>
                     </table>

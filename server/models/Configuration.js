@@ -101,11 +101,11 @@ const ConfigurationModel = {
     getBranchesForYear(year) {
         const db = getDb();
         return db.prepare(`
-            SELECT DISTINCT b.id, b.branch_code, b.branch_name
+            SELECT DISTINCT b.id, b.branch_code, b.branch_name, b.section
             FROM year_branch_subjects ybs
             JOIN branches b ON b.id = ybs.branch_id
             WHERE ybs.year = ?
-            ORDER BY b.branch_code
+            ORDER BY b.branch_code, b.section
         `).all(year);
     },
 
@@ -235,7 +235,8 @@ const ConfigurationModel = {
     getExamTimetableByDate(examDate, timeSlot = null) {
         const db = getDb();
         let sql = `
-            SELECT et.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name,
+            SELECT et.*, b.branch_code, b.branch_name, b.section as branch_section,
+                   s.subject_code, s.subject_name,
                    ybs.subject_type
             FROM exam_timetable et
             JOIN branches b ON b.id = et.branch_id
@@ -368,24 +369,54 @@ const ConfigurationModel = {
     getStudentBranchesForYear(year) {
         const db = getDb();
         return db.prepare(`
-            SELECT DISTINCT sm.branch_code, b.id as branch_id, b.branch_name
+            SELECT DISTINCT sm.branch_code, sm.section, b.id as branch_id, b.branch_name
             FROM student_master sm
             LEFT JOIN branches b ON UPPER(b.branch_code) = UPPER(sm.branch_code)
+                AND COALESCE(b.section, '') = COALESCE(sm.section, '')
             WHERE sm.year = ?
-            ORDER BY sm.branch_code
+            ORDER BY sm.branch_code, sm.section
         `).all(year);
     },
 
     /**
      * Get roll numbers for a specific year and branch.
      */
-    getRollNumbers(year, branchCode) {
+    getRollNumbers(year, branchCode, section) {
         const db = getDb();
+        if (section !== undefined && section !== null && section !== '') {
+            return db.prepare(`
+                SELECT roll_number, student_name FROM student_master
+                WHERE year = ? AND UPPER(branch_code) = UPPER(?)
+                  AND COALESCE(section, '') = ?
+                ORDER BY roll_number
+            `).all(year, branchCode, section);
+        }
         return db.prepare(`
             SELECT roll_number, student_name FROM student_master
             WHERE year = ? AND UPPER(branch_code) = UPPER(?)
             ORDER BY roll_number
         `).all(year, branchCode);
+    },
+
+    /**
+     * Get roll numbers grouped by section for a branch.
+     * Returns { section: string, rolls: [{roll_number, student_name}] }[]
+     */
+    getRollNumbersBySection(year, branchCode) {
+        const db = getDb();
+        const rows = db.prepare(`
+            SELECT roll_number, student_name, COALESCE(section, '') as section
+            FROM student_master
+            WHERE year = ? AND UPPER(branch_code) = UPPER(?)
+            ORDER BY section, roll_number
+        `).all(year, branchCode);
+
+        const groups = {};
+        for (const r of rows) {
+            if (!groups[r.section]) groups[r.section] = [];
+            groups[r.section].push(r);
+        }
+        return Object.entries(groups).map(([section, rolls]) => ({ section, rolls }));
     },
 
     /**

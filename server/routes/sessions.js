@@ -9,6 +9,7 @@ const router = express.Router();
 const ExamSessionModel = require('../models/ExamSession');
 const AllocationModel = require('../models/Allocation');
 const ConfigurationModel = require('../models/Configuration');
+const BranchModel = require('../models/Branch');
 const { allocateSeats, validateAllocation, buildRoomWiseSummary } = require('../engine');
 const { generateExcel } = require('../export/excel');
 const { generatePDF } = require('../export/pdf');
@@ -67,34 +68,65 @@ router.post('/', (req, res) => {
                 const entries = ConfigurationModel.getExamTimetableByDate(examDate, slot || null);
                 const yearEntries = entries.filter(e => e.year === Number(year));
                 if (yearEntries.length > 0) {
-                    // Save branch-subject mappings
-                    const mappings = yearEntries.map(e => ({
-                        branchId: e.branch_id,
-                        subjectId: e.subject_id
-                    }));
-                    ExamSessionModel.assignBranchSubjects(session.id, mappings);
-
                     // Auto-populate students from student_master
                     // For elective subjects (PE/OE), use student_electives mapping
-                    // For regular subjects, use all students in the branch
+                    // For regular subjects, use all students in the branch, split by section
                     const studentEntries = [];
+                    const branchSubjectMappings = [];
                     for (const e of yearEntries) {
                         const isElective = e.subject_type === 'PE' || e.subject_type === 'OE';
-                        let students;
                         if (isElective) {
-                            students = ConfigurationModel.getRollNumbersForElective(Number(year), e.subject_id);
+                            // Electives: keep the base branch mapping
+                            branchSubjectMappings.push({ branchId: e.branch_id, subjectId: e.subject_id });
+                            const students = ConfigurationModel.getRollNumbersForElective(Number(year), e.subject_id);
+                            if (students.length > 0) {
+                                studentEntries.push({
+                                    branchId: e.branch_id,
+                                    subjectId: e.subject_id,
+                                    rollNumbers: students.map(s => s.roll_number),
+                                    exclude: [],
+                                    include: []
+                                });
+                            }
                         } else {
-                            students = ConfigurationModel.getRollNumbers(Number(year), e.branch_code);
+                            // Split students by section from student_master
+                            const sectionGroups = ConfigurationModel.getRollNumbersBySection(Number(year), e.branch_code);
+                            const hasSections = sectionGroups.some(sg => sg.section);
+                            for (const sg of sectionGroups) {
+                                let branchId = e.branch_id;
+                                if (sg.section) {
+                                    // Find or create section-specific branch
+                                    let secBranch = BranchModel.getByCode(e.branch_code, sg.section);
+                                    if (!secBranch) {
+                                        secBranch = BranchModel.create({
+                                            branchCode: e.branch_code,
+                                            branchName: e.branch_code,
+                                            section: sg.section
+                                        });
+                                    }
+                                    branchId = secBranch.id;
+                                }
+                                // Add branch-subject mapping (section-specific replaces base)
+                                branchSubjectMappings.push({ branchId, subjectId: e.subject_id });
+                                if (sg.rolls.length > 0) {
+                                    studentEntries.push({
+                                        branchId: branchId,
+                                        subjectId: e.subject_id,
+                                        rollNumbers: sg.rolls.map(s => s.roll_number),
+                                        exclude: [],
+                                        include: []
+                                    });
+                                }
+                            }
+                            // If sections exist, don't also add the base branch mapping
+                            if (!hasSections) {
+                                branchSubjectMappings.push({ branchId: e.branch_id, subjectId: e.subject_id });
+                            }
                         }
-                        if (students.length > 0) {
-                            studentEntries.push({
-                                branchId: e.branch_id,
-                                subjectId: e.subject_id,
-                                rollNumbers: students.map(s => s.roll_number),
-                                exclude: [],
-                                include: []
-                            });
-                        }
+                    }
+                    // Save only the correct mappings (no base+section duplicates)
+                    if (branchSubjectMappings.length > 0) {
+                        ExamSessionModel.assignBranchSubjects(session.id, branchSubjectMappings);
                     }
                     if (studentEntries.length > 0) {
                         ExamSessionModel.setStudentsFromDb(session.id, studentEntries);

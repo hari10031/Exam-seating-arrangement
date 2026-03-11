@@ -75,11 +75,11 @@ function initSchema(database) {
     // Now safe to create year index
     database.exec("CREATE INDEX IF NOT EXISTS idx_student_master_year ON student_master(year);");
 
-    // Migration: add year column to exam_sessions if missing
+    // Migration: add section column to student_master if missing
     try {
-        const smCols = database.prepare("PRAGMA table_info(student_master)").all();
-        if (!smCols.find(c => c.name === 'year')) {
-            database.exec("ALTER TABLE student_master ADD COLUMN year INTEGER");
+        const smCols2 = database.prepare("PRAGMA table_info(student_master)").all();
+        if (!smCols2.find(c => c.name === 'section')) {
+            database.exec("ALTER TABLE student_master ADD COLUMN section TEXT DEFAULT ''");
         }
     } catch (_) { /* column already exists */ }
 
@@ -133,6 +133,14 @@ function initSchema(database) {
         }
     } catch (_) { /* column already exists */ }
 
+    // Migration: add student_name column to seat_allocations if missing
+    try {
+        const saCols = database.prepare("PRAGMA table_info(seat_allocations)").all();
+        if (!saCols.find(c => c.name === 'student_name')) {
+            database.exec("ALTER TABLE seat_allocations ADD COLUMN student_name TEXT");
+        }
+    } catch (_) { /* column already exists */ }
+
     // Migration: change session_branch_subjects UNIQUE constraint to (session_id, branch_id, subject_id)
     // to allow multiple subjects per branch in one session (electives).
     try {
@@ -153,6 +161,50 @@ function initSchema(database) {
             `);
         }
     } catch (_) { /* migration already applied or table is new */ }
+
+    // Migration: add section column to branches if missing
+    try {
+        const branchCols = database.prepare("PRAGMA table_info(branches)").all();
+        if (!branchCols.find(c => c.name === 'section')) {
+            database.exec("ALTER TABLE branches ADD COLUMN section TEXT NOT NULL DEFAULT ''");
+            // Change UNIQUE constraint from (branch_code) to (branch_code, section)
+            try {
+                const bInfo = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='branches'").get();
+                if (bInfo && bInfo.sql && bInfo.sql.includes('branch_code') && !bInfo.sql.includes('branch_code, section')) {
+                    database.exec(`
+                        CREATE TABLE IF NOT EXISTS branches_new (
+                            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                            branch_code TEXT    NOT NULL,
+                            branch_name TEXT    NOT NULL,
+                            section     TEXT    NOT NULL DEFAULT '',
+                            created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                            UNIQUE(branch_code, section)
+                        );
+                        INSERT OR IGNORE INTO branches_new (id, branch_code, branch_name, section, created_at)
+                            SELECT id, branch_code, branch_name, '', created_at FROM branches;
+                        DROP TABLE branches;
+                        ALTER TABLE branches_new RENAME TO branches;
+                    `);
+                }
+            } catch (_) { /* table already has new constraint */ }
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Migration: add branch_section column to seat_allocations if missing
+    try {
+        const saCols = database.prepare("PRAGMA table_info(seat_allocations)").all();
+        if (!saCols.find(c => c.name === 'branch_section')) {
+            database.exec("ALTER TABLE seat_allocations ADD COLUMN branch_section TEXT DEFAULT ''");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Migration: add section column to student_master if missing
+    try {
+        const smCols2 = database.prepare("PRAGMA table_info(student_master)").all();
+        if (!smCols2.find(c => c.name === 'section')) {
+            database.exec("ALTER TABLE student_master ADD COLUMN section TEXT NOT NULL DEFAULT ''");
+        }
+    } catch (_) { /* column already exists */ }
 }
 
 function closeDb() {

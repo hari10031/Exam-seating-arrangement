@@ -64,7 +64,7 @@
  * @param {Array}  params.rooms      - Rooms in use, sorted by room_code
  *        Each: { id, room_code, rows, columns }
  * @param {Array}  params.students   - All students for this session
- *        Each: { id, roll_number, branch_code, subject_name, branch_id, subject_id }
+ *        Each: { id, roll_number, branch_code, branch_section, subject_name, branch_id, subject_id }
  * @param {string} params.mode       - 'SINGLE' | 'DOUBLE'
  * @param {string} [params.allocationMethod='INTERLEAVED'] - 'INTERLEAVED' | 'LINEAR'
  *
@@ -133,7 +133,9 @@ function allocateSingle(rooms, students) {
             seatPosition: 'A',
             studentId: student.id,
             rollNumber: student.roll_number,
+            studentName: student.student_name || '',
             branchCode: student.branch_code,
+            branchSection: student.branch_section || '',
             subjectName: student.subject_name
         });
     }
@@ -196,7 +198,9 @@ function allocateDouble(rooms, students) {
             seatPosition: 'A',
             studentId: pair.a.id,
             rollNumber: pair.a.roll_number,
+            studentName: pair.a.student_name || '',
             branchCode: pair.a.branch_code,
+            branchSection: pair.a.branch_section || '',
             subjectName: pair.a.subject_name
         });
         allocations.push({
@@ -206,7 +210,9 @@ function allocateDouble(rooms, students) {
             seatPosition: 'B',
             studentId: pair.b.id,
             rollNumber: pair.b.roll_number,
+            studentName: pair.b.student_name || '',
             branchCode: pair.b.branch_code,
+            branchSection: pair.b.branch_section || '',
             subjectName: pair.b.subject_name
         });
     }
@@ -223,7 +229,9 @@ function allocateDouble(rooms, students) {
             seatPosition: 'A',
             studentId: solo.id,
             rollNumber: solo.roll_number,
+            studentName: solo.student_name || '',
             branchCode: solo.branch_code,
+            branchSection: solo.branch_section || '',
             subjectName: solo.subject_name
         });
         // Seat B is intentionally left empty
@@ -311,7 +319,9 @@ function allocateLinearSingle(rooms, students) {
             seatPosition: 'A',
             studentId: student.id,
             rollNumber: student.roll_number,
+            studentName: student.student_name || '',
             branchCode: student.branch_code,
+            branchSection: student.branch_section || '',
             subjectName: student.subject_name
         });
     }
@@ -363,11 +373,13 @@ function allocateLinearSingle(rooms, students) {
 function allocateLinearDouble(rooms, students) {
     const totalSeats = rooms.reduce((sum, r) => sum + r.rows * r.columns * 2, 0);
 
-    // Group by branch+subject so that the same branch with different elective
+    // Group by branch+section+subject so that the same branch with different elective
     // subjects gets separate queues that can be paired together.
     const branchSubjectGroups = {};
     for (const s of students) {
-        const key = `${s.branch_code}::${s.subject_name}`;
+        const section = s.branch_section || '';
+        const branchKey = section ? `${s.branch_code}-${section}` : s.branch_code;
+        const key = `${branchKey}::${s.subject_name}`;
         if (!branchSubjectGroups[key]) branchSubjectGroups[key] = [];
         branchSubjectGroups[key].push(s);
     }
@@ -436,7 +448,9 @@ function allocateLinearDouble(rooms, students) {
             seatPosition: 'A',
             studentId: studentA.id,
             rollNumber: studentA.roll_number,
+            studentName: studentA.student_name || '',
             branchCode: studentA.branch_code,
+            branchSection: studentA.branch_section || '',
             subjectName: studentA.subject_name
         });
 
@@ -452,7 +466,9 @@ function allocateLinearDouble(rooms, students) {
                 seatPosition: 'B',
                 studentId: studentB.id,
                 rollNumber: studentB.roll_number,
+                studentName: studentB.student_name || '',
                 branchCode: studentB.branch_code,
+                branchSection: studentB.branch_section || '',
                 subjectName: studentB.subject_name
             });
 
@@ -623,7 +639,7 @@ function buildSeatSlots(rooms, mode) {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Group students by subject_name, sorting each group by roll_number.
+ * Group students by subject_name, sorting each group by section then roll_number.
  * @returns {Object<string, Array>}
  */
 function groupBySubject(students) {
@@ -633,9 +649,13 @@ function groupBySubject(students) {
         if (!groups[key]) groups[key] = [];
         groups[key].push(s);
     }
-    // Sort each group by roll number for determinism
+    // Sort each group by section first, then roll number — ensures one section
+    // completes before the next within the same subject.
     for (const key of Object.keys(groups)) {
         groups[key].sort((a, b) => {
+            const secA = a.branch_section || '';
+            const secB = b.branch_section || '';
+            if (secA !== secB) return secA.localeCompare(secB);
             const ra = parseInt(a.roll_number, 10);
             const rb = parseInt(b.roll_number, 10);
             if (!isNaN(ra) && !isNaN(rb)) return ra - rb;
@@ -650,13 +670,15 @@ function groupBySubject(students) {
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Group students by branch_code, sorting each group by roll_number.
+ * Group students by branch_code + section, sorting each group by roll_number.
+ * Key format: "CSE" or "CSE-A" (with section).
  * @returns {Object<string, Array>}
  */
 function groupByBranch(students) {
     const groups = {};
     for (const s of students) {
-        const key = s.branch_code;
+        const section = s.branch_section || '';
+        const key = section ? `${s.branch_code}-${section}` : s.branch_code;
         if (!groups[key]) groups[key] = [];
         groups[key].push(s);
     }
@@ -691,11 +713,13 @@ function buildRoomWiseSummary(allocations, rooms) {
         roomMap[r.id] = r.room_code;
     }
 
-    // Group allocations by subject → branch → room
+    // Group allocations by subject → branch (with section) → room
     const tree = {};
     for (const a of allocations) {
         const subj = a.subjectName || a.subject_name || '';
-        const branch = a.branchCode || a.branch_code || '';
+        const baseBranch = a.branchCode || a.branch_code || '';
+        const section = a.branchSection || a.branch_section || '';
+        const branch = section ? `${baseBranch}-${section}` : baseBranch;
         const roomCode = roomMap[a.roomId || a.room_id] || a.roomCode || a.room_code || '';
         const roll = a.rollNumber || a.roll_number || '';
 
