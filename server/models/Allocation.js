@@ -12,14 +12,12 @@ const AllocationModel = {
      */
     saveAllocations(sessionId, allocations) {
         const db = getDb();
-        const del = db.prepare('DELETE FROM seat_allocations WHERE session_id = ?');
         const ins = db.prepare(`
-      INSERT INTO seat_allocations
+      INSERT OR REPLACE INTO seat_allocations
         (session_id, room_id, row_number, column_number, seat_position, student_id, roll_number, branch_code, subject_name)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
         const txn = db.transaction(() => {
-            del.run(sessionId);
             for (const a of allocations) {
                 ins.run(
                     sessionId,
@@ -121,9 +119,8 @@ const AllocationModel = {
 
     saveReport(sessionId, report) {
         const db = getDb();
-        db.prepare('DELETE FROM allocation_reports WHERE session_id = ?').run(sessionId);
         db.prepare(`
-      INSERT INTO allocation_reports
+      INSERT OR REPLACE INTO allocation_reports
         (session_id, total_students, total_seats, assigned_count, unassigned_count, unassigned_reasons)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(

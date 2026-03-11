@@ -70,6 +70,8 @@ export default function ConfigurationPage() {
     const [success, setSuccess] = useState('');
     const [allBranches, setAllBranches] = useState([]);
     const [allSubjects, setAllSubjects] = useState([]);
+    const [showResetConfirm, setShowResetConfirm] = useState(false);
+    const [resetting, setResetting] = useState(false);
 
     useEffect(() => {
         branchesApi.getAll().then(setAllBranches).catch(e => setError(e.message));
@@ -78,12 +80,76 @@ export default function ConfigurationPage() {
 
     const clearMessages = () => { setError(''); setSuccess(''); };
 
+    const handleReset = async () => {
+        setResetting(true);
+        clearMessages();
+        try {
+            await configApi.resetDatabase();
+            setSuccess('All database data has been deleted successfully.');
+            setAllBranches([]);
+            setAllSubjects([]);
+            setShowResetConfirm(false);
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setResetting(false);
+        }
+    };
+
     return (
         <div>
-            <div className="page-header">
-                <h2>Configuration</h2>
-                <p style={{ color: '#666', fontSize: 14 }}>Import and configure data from XLSX files</p>
+            <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                    <h2>Configuration</h2>
+                    <p style={{ color: '#666', fontSize: 14 }}>Import and configure data from XLSX files</p>
+                </div>
+                <button
+                    onClick={() => setShowResetConfirm(true)}
+                    style={{
+                        background: '#dc3545', color: '#fff', border: 'none',
+                        padding: '8px 18px', borderRadius: 6, cursor: 'pointer',
+                        fontWeight: 600, fontSize: 14
+                    }}
+                >
+                    Reset Database
+                </button>
             </div>
+
+            {showResetConfirm && (
+                <div style={{
+                    background: '#fff3cd', border: '1px solid #ffc107', borderRadius: 8,
+                    padding: 16, marginBottom: 16
+                }}>
+                    <strong style={{ color: '#856404' }}>⚠ Are you sure?</strong>
+                    <p style={{ margin: '8px 0', color: '#856404' }}>
+                        This will permanently delete <b>all data</b> from the database including rooms, branches,
+                        subjects, sessions, allocations, timetable, electives, and imported students.
+                        This action cannot be undone.
+                    </p>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button
+                            onClick={handleReset}
+                            disabled={resetting}
+                            style={{
+                                background: '#dc3545', color: '#fff', border: 'none',
+                                padding: '6px 16px', borderRadius: 4, cursor: 'pointer', fontWeight: 600
+                            }}
+                        >
+                            {resetting ? 'Deleting...' : 'Yes, Delete Everything'}
+                        </button>
+                        <button
+                            onClick={() => setShowResetConfirm(false)}
+                            disabled={resetting}
+                            style={{
+                                background: '#6c757d', color: '#fff', border: 'none',
+                                padding: '6px 16px', borderRadius: 4, cursor: 'pointer'
+                            }}
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {error && <div className="alert alert-danger">{error}</div>}
             {success && <div className="alert alert-success">{success}</div>}

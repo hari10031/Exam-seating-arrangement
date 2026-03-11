@@ -142,4 +142,7 @@ export const configApi = {
     getTimetableYears: () => api('/config/timetable/years'),
     deleteTimetable: (year) =>
         api(`/config/timetable/${year}`, { method: 'DELETE' }),
+
+    // Reset entire database
+    resetDatabase: () => api('/config/reset', { method: 'DELETE' }),
 };

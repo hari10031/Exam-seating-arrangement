@@ -22,13 +22,11 @@ const ConfigurationModel = {
      */
     setYearBranchSubjects(year, mappings) {
         const db = getDb();
-        const del = db.prepare('DELETE FROM year_branch_subjects WHERE year = ?');
         const ins = db.prepare(`
             INSERT OR REPLACE INTO year_branch_subjects (year, branch_id, subject_id, subject_type)
             VALUES (?, ?, ?, ?)
         `);
         const txn = db.transaction(() => {
-            del.run(year);
             for (const m of mappings) {
                 ins.run(year, m.branchId, m.subjectId, m.subjectType || 'REGULAR');
             }
@@ -219,13 +217,11 @@ const ConfigurationModel = {
      */
     replaceExamTimetable(year, entries) {
         const db = getDb();
-        const del = db.prepare('DELETE FROM exam_timetable WHERE year = ?');
         const ins = db.prepare(`
-            INSERT INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot)
+            INSERT OR REPLACE INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot)
             VALUES (?, ?, ?, ?, ?, ?)
         `);
         const txn = db.transaction(() => {
-            del.run(year);
             for (const e of entries) {
                 ins.run(year, e.branchId, e.subjectId, e.examDate, e.slot || null, e.timeSlot || null);
             }

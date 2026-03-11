@@ -75,10 +75,8 @@ const ExamSessionModel = {
 
     assignRooms(sessionId, roomIds) {
         const db = getDb();
-        const del = db.prepare('DELETE FROM session_rooms WHERE session_id = ?');
-        const ins = db.prepare('INSERT INTO session_rooms (session_id, room_id) VALUES (?, ?)');
+        const ins = db.prepare('INSERT OR IGNORE INTO session_rooms (session_id, room_id) VALUES (?, ?)');
         const txn = db.transaction(() => {
-            del.run(sessionId);
             for (const roomId of roomIds) {
                 ins.run(sessionId, roomId);
             }
@@ -100,13 +98,11 @@ const ExamSessionModel = {
 
     assignBranchSubjects(sessionId, mappings) {
         const db = getDb();
-        const del = db.prepare('DELETE FROM session_branch_subjects WHERE session_id = ?');
         const ins = db.prepare(`
-      INSERT INTO session_branch_subjects (session_id, branch_id, subject_id)
+      INSERT OR IGNORE INTO session_branch_subjects (session_id, branch_id, subject_id)
       VALUES (?, ?, ?)
     `);
         const txn = db.transaction(() => {
-            del.run(sessionId);
             for (const { branchId, subjectId } of mappings) {
                 ins.run(sessionId, branchId, subjectId);
             }
@@ -139,13 +135,11 @@ const ExamSessionModel = {
      */
     setStudents(sessionId, entries) {
         const db = getDb();
-        const del = db.prepare('DELETE FROM students WHERE session_id = ?');
         const ins = db.prepare(`
-      INSERT INTO students (session_id, branch_id, subject_id, roll_number)
+      INSERT OR IGNORE INTO students (session_id, branch_id, subject_id, roll_number)
       VALUES (?, ?, ?, ?)
     `);
         const txn = db.transaction(() => {
-            del.run(sessionId);
             for (const entry of entries) {
                 const rollSet = expandRolls(entry.ranges, entry.exclude, entry.include);
                 for (const roll of rollSet) {
@@ -163,7 +157,6 @@ const ExamSessionModel = {
      */
     setStudentsFromDb(sessionId, entries) {
         const db = getDb();
-        const del = db.prepare('DELETE FROM students WHERE session_id = ?');
         const ins = db.prepare(`
       INSERT OR IGNORE INTO students (session_id, branch_id, subject_id, roll_number, student_name)
       VALUES (?, ?, ?, ?, ?)
@@ -174,7 +167,6 @@ const ExamSessionModel = {
         );
 
         const txn = db.transaction(() => {
-            del.run(sessionId);
             for (const entry of entries) {
                 const excludeSet = new Set((entry.exclude || []).map(r => String(r).trim()));
                 const rolls = (entry.rollNumbers || []).filter(r => !excludeSet.has(String(r).trim()));

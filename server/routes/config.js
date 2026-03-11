@@ -764,10 +764,6 @@ router.post('/electives/import', async (req, res) => {
         }
 
         if (choices.length > 0) {
-            // Clear existing electives for types being imported
-            for (const t of typesUsed) {
-                ConfigurationModel.clearElectives(Number(year), t);
-            }
             ConfigurationModel.setStudentElectives(choices);
         }
 
@@ -1018,6 +1014,50 @@ router.delete('/timetable/:year', (req, res) => {
     try {
         ConfigurationModel.deleteExamTimetable(Number(req.params.year));
         res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  RESET DATABASE — Delete all data from all tables
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * DELETE /api/config/reset
+ * Deletes all data from every table in the database.
+ * Tables are cleared in dependency order (children first).
+ */
+router.delete('/reset', (req, res) => {
+    try {
+        const db = getDb();
+
+        // Delete in dependency order: children before parents
+        const tables = [
+            'allocation_reports',
+            'seat_allocations',
+            'students',
+            'session_branch_subjects',
+            'session_rooms',
+            'exam_sessions',
+            'student_electives',
+            'exam_timetable',
+            'year_branch_subjects',
+            'student_master',
+            'subjects',
+            'branches',
+            'rooms',
+        ];
+
+        const deleteAll = db.transaction(() => {
+            for (const table of tables) {
+                db.prepare(`DELETE FROM ${table}`).run();
+            }
+        });
+
+        deleteAll();
+
+        res.json({ success: true, message: 'All database data has been deleted' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
