@@ -79,10 +79,10 @@ export default function SessionDetail() {
                 if (yr) {
                     Promise.all(newEntries.map(async (e) => {
                         const isElective = e.subjectType === 'PE' || e.subjectType === 'OE';
-                        const k = isElective ? `${yr}-sub-${e.subjectId}` : `${yr}-${e.branchId}`;
+                        const k = isElective ? `${yr}-sub-${e.subjectId}-${e.branchId}` : `${yr}-${e.branchId}`;
                         try {
                             const params = isElective
-                                ? { year: yr, subjectId: e.subjectId }
+                                ? { year: yr, subjectId: e.subjectId, branchId: e.branchId }
                                 : { year: yr, branchId: e.branchId };
                             const studs = await configApi.getStudents(params);
                             return { k, studs };
@@ -138,7 +138,7 @@ export default function SessionDetail() {
                             try {
                                 const isElective = m.subjectType === 'PE' || m.subjectType === 'OE';
                                 const params = isElective
-                                    ? { year: m.year, subjectId: m.subjectId }
+                                    ? { year: m.year, subjectId: m.subjectId, branchId: m.branchId }
                                     : { year: m.year, branchId: m.branchId };
                                 const students = await configApi.getStudents(params);
                                 if (students.length > 0) {
@@ -269,8 +269,8 @@ export default function SessionDetail() {
                 const isElective = m.subjectType === 'PE' || m.subjectType === 'OE';
                 try {
                     if (isElective) {
-                        const k = `${year}-sub-${m.subjectId}`;
-                        const studs = await configApi.getStudents({ year, subjectId: m.subjectId });
+                        const k = `${year}-sub-${m.subjectId}-${m.branchId}`;
+                        const studs = await configApi.getStudents({ year, subjectId: m.subjectId, branchId: m.branchId });
                         setDbStudents(prev => ({ ...prev, [k]: studs }));
                     } else {
                         await loadDbStudentsForBranch(year, m.branchId);
@@ -298,19 +298,19 @@ export default function SessionDetail() {
         setError(''); setSuccess('');
         try {
             const entriesWithRolls = [];
-            const branchCounts = [];
-            const emptyBranches = [];
+            const branchCounts = new Set();
+            const emptyBranches = new Set();
             // Fetch students fresh for each unique year-branch/subject combo
             const fetchedStudents = {};
             for (const e of studentEntries) {
                 if (!e.branchId || !e.subjectId) continue;
                 const year = e.year || session?.year || pickerYear || configuredYears[0];
                 const isElective = e.subjectType === 'PE' || e.subjectType === 'OE';
-                const key = isElective ? `${year}-sub-${e.subjectId}` : `${year}-${e.branchId}`;
+                const key = isElective ? `${year}-sub-${e.subjectId}-${e.branchId}` : `${year}-${e.branchId}`;
                 if (!fetchedStudents[key]) {
                     try {
                         const params = isElective
-                            ? { year, subjectId: e.subjectId }
+                            ? { year, subjectId: e.subjectId, branchId: e.branchId }
                             : { year, branchId: e.branchId };
                         fetchedStudents[key] = await configApi.getStudents(params);
                     } catch (fetchErr) {
@@ -321,9 +321,9 @@ export default function SessionDetail() {
                 const students = fetchedStudents[key] || [];
                 const branchLabel = e.branchCode || `Branch ${e.branchId}`;
                 if (students.length === 0) {
-                    emptyBranches.push(branchLabel);
+                    emptyBranches.add(branchLabel);
                 } else {
-                    branchCounts.push(`${branchLabel}: ${students.length}`);
+                    branchCounts.add(`${branchLabel}: ${students.length}`);
                 }
                 entriesWithRolls.push({
                     branchId: Number(e.branchId), subjectId: Number(e.subjectId),
@@ -334,9 +334,11 @@ export default function SessionDetail() {
             }
             const result = await sessionsApi.setStudentsFromDb(sessionId, entriesWithRolls);
             let msg = `Students saved! Total: ${result.count}`;
-            if (branchCounts.length > 0) msg += ` (${branchCounts.join(', ')})`;
-            if (emptyBranches.length > 0) {
-                setError(`No students found in database for: ${emptyBranches.join(', ')}. Please import student data for these branches.`);
+            const branchCountsList = Array.from(branchCounts);
+            const emptyBranchesList = Array.from(emptyBranches);
+            if (branchCountsList.length > 0) msg += ` (${branchCountsList.join(', ')})`;
+            if (emptyBranchesList.length > 0) {
+                setError(`No students found in database for: ${emptyBranchesList.join(', ')}. Please import student data for these branches.`);
             }
             setSuccess(msg);
             loadSession();
@@ -703,7 +705,7 @@ export default function SessionDetail() {
                         {studentEntries.map((entry, i) => {
                             const year = entry.year || session?.year || pickerYear || configuredYears[0];
                             const isElective = entry.subjectType === 'PE' || entry.subjectType === 'OE';
-                            const key = isElective ? `${year}-sub-${entry.subjectId}` : `${year}-${entry.branchId}`;
+                            const key = isElective ? `${year}-sub-${entry.subjectId}-${entry.branchId}` : `${year}-${entry.branchId}`;
                             const branchStudents = dbStudents[key] || [];
 
                             return (

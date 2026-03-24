@@ -300,7 +300,9 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         row++;
         ws.getCell(row, 1).value = 'Date';
         ws.getCell(row, 2).value = examDate;
-        ws.getCell(row, 3).value = 'No of Students Absent';
+        //Db change
+        ws.getCell(row, 3).value = 'Acadmeic Year';
+        ws.getCell(row, 4).value = 'No of Students Absent';
         // ws.getCell(row, 4).value = roomCode;
         // ws.getCell(row, 5).value = 'No of Students Absent';
 
@@ -488,8 +490,9 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         row++;
         ws.getCell(row, 1).value = 'Date';
         ws.getCell(row, 2).value = examDate;
-        ws.getCell(row, 3).value = 'No of Students Absent';
-        ws.getCell(row, 4).value = '';
+        //Db change
+        ws.getCell(row, 3).value = 'Year';
+        ws.getCell(row, 4).value = 'No of Students Absent';
         // ws.getCell(row, 5).value = 'No of Students Absent';
         // ws.getCell(row, 6).value = '';
 
@@ -667,15 +670,16 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         ws.getCell(row, 3).value = '';
         ws.getCell(row, 4).value = semLabel ? `BE ${semLabel}` : '';
         ws.getCell(row, 5).value = 'No of Students Present';
-        ws.getCell(row, 6).value = '';
+        // ws.getCell(row, 6).value = '';
 
         row++;
         ws.getCell(row, 1).value = 'Date';
         ws.getCell(row, 2).value = examDate;
         ws.getCell(row, 3).value = '';
         ws.getCell(row, 4).value = '';
-        ws.getCell(row, 5).value = 'No of Students Absent';
-        ws.getCell(row, 6).value = '';
+        //Db change
+        ws.getCell(row, 5).value = 'Acamdemic Year - 2025-2026';
+        ws.getCell(row, 6).value = 'No of Students Absent';
 
         // Style info table
         for (let r = infoStart; r <= row; r++) {

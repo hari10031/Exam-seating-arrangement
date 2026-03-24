@@ -421,11 +421,16 @@ const ConfigurationModel = {
 
     /**
      * Get roll numbers for students who chose a specific elective subject.
-     * Uses student_electives table and joins with student_master for names.
+     * Uses student_electives + subjects + student_master.
+     *
+     * Supports optional branch filters so elective lookup is scoped per branch/section.
+     * Also performs name-based fallback matching to handle timetable subjects like:
+     * "PE – II : Object Oriented System Development" vs
+     * "Object Oriented System Development".
      */
-    getRollNumbersForElective(year, subjectId) {
+    getRollNumbersForElective(year, subjectId, branchCode = null, section = null) {
         const db = getDb();
-        return db.prepare(`
+        let sql = `
             SELECT DISTINCT se.roll_number, sm.student_name
             FROM student_electives se
             LEFT JOIN student_master sm ON sm.roll_number = se.roll_number
@@ -433,13 +438,27 @@ const ConfigurationModel = {
               AND (
                 se.subject_id = ?
                 OR se.subject_id IN (
-                  SELECT s2.id FROM subjects s2
-                  JOIN subjects s1 ON s1.id = ?
-                  WHERE s1.subject_name LIKE '%(' || s2.subject_name || ')%'
+                    SELECT s2.id
+                    FROM subjects s2
+                    JOIN subjects s1 ON s1.id = ?
+                    WHERE UPPER(TRIM(s1.subject_name)) LIKE '%' || UPPER(TRIM(s2.subject_name)) || '%'
+                       OR UPPER(TRIM(s2.subject_name)) LIKE '%' || UPPER(TRIM(s1.subject_name)) || '%'
                 )
               )
-            ORDER BY se.roll_number
-        `).all(year, subjectId, subjectId);
+        `;
+        const params = [year, subjectId, subjectId];
+
+        if (branchCode) {
+            sql += ` AND UPPER(COALESCE(sm.branch_code, '')) = UPPER(?)`;
+            params.push(branchCode);
+            if (section !== undefined && section !== null && section !== '') {
+                sql += ` AND COALESCE(sm.section, '') = ?`;
+                params.push(section);
+            }
+        }
+
+        sql += ' ORDER BY se.roll_number';
+        return db.prepare(sql).all(...params);
     },
 
     /**

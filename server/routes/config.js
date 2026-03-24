@@ -283,11 +283,6 @@ router.get('/students', (req, res) => {
     try {
         const { year, branch, branchId, subjectId } = req.query;
 
-        // If subjectId provided, return only students who chose that elective
-        if (year && subjectId) {
-            res.json(ConfigurationModel.getRollNumbersForElective(Number(year), Number(subjectId)));
-            return;
-        }
         const db = getDb();
 
         let branchCode = branch;
@@ -296,6 +291,18 @@ router.get('/students', (req, res) => {
             const row = db.prepare('SELECT branch_code, section FROM branches WHERE id = ?').get(Number(branchId));
             branchCode = row ? row.branch_code : null;
             section = row ? row.section : undefined;
+        }
+
+        // If subjectId provided, return only students who chose that elective.
+        // When branch/branchId is provided, scope results to that branch+section.
+        if (year && subjectId) {
+            res.json(ConfigurationModel.getRollNumbersForElective(
+                Number(year),
+                Number(subjectId),
+                branchCode || null,
+                section
+            ));
+            return;
         }
 
         if (year && branchCode) {
