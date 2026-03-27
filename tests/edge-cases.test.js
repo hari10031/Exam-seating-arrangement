@@ -943,3 +943,297 @@ describe('End-to-End: Allocate then Validate', () => {
         expect(validation.valid).toBe(true);
     });
 });
+
+// ═══════════════════════════════════════════════════════════════
+//  ELECTIVE ORDERING BY SUBJECT CODE — TESTS
+// ═══════════════════════════════════════════════════════════════
+
+describe('Elective Ordering by Subject Code', () => {
+    // Helper to create student with subject_code
+    function makeStudentWithCode(id, roll, branch, subjectName, subjectCode, section = '') {
+        return {
+            id,
+            roll_number: String(roll),
+            branch_code: branch,
+            branch_section: section,
+            subject_name: subjectName,
+            subject_code: subjectCode,
+            branch_id: 1,
+            subject_id: 1
+        };
+    }
+
+    test('LINEAR SINGLE orders electives by subject_code within same branch', () => {
+        const rooms = [{ id: 1, room_code: 'R1', rows: 10, columns: 1 }];
+
+        // Create students with different electives (out of order)
+        const students = [
+            makeStudentWithCode(1, 101, 'CSE', 'OE-II Elective', 'OE-II', ''),
+            makeStudentWithCode(2, 102, 'CSE', 'PE-II Elective', 'PE-II', ''),
+            makeStudentWithCode(3, 103, 'CSE', 'PE-I Elective', 'PE-I', ''),
+            makeStudentWithCode(4, 104, 'CSE', 'OE-I Elective', 'OE-I', ''),
+        ];
+
+        const { allocations } = allocateSeats({
+            rooms,
+            students,
+            mode: 'SINGLE',
+            allocationMethod: 'LINEAR'
+        });
+
+        // Should be ordered: OE-I, OE-II, PE-I, PE-II (alphabetical by subject_code)
+        const subjectOrder = allocations.map(a => a.subjectName);
+        expect(subjectOrder[0]).toBe('OE-I Elective');
+        expect(subjectOrder[1]).toBe('OE-II Elective');
+        expect(subjectOrder[2]).toBe('PE-I Elective');
+        expect(subjectOrder[3]).toBe('PE-II Elective');
+    });
+
+    test('LINEAR DOUBLE orders electives by subject_code and pairs correctly', () => {
+        const rooms = [{ id: 1, room_code: 'R1', rows: 5, columns: 2 }]; // 20 seats
+
+        // Create students from different branches with different electives
+        const students = [
+            // CSE students with PE-II and PE-I (out of order)
+            makeStudentWithCode(1, 101, 'CSE', 'PE-II', 'PE-II', 'A'),
+            makeStudentWithCode(2, 102, 'CSE', 'PE-II', 'PE-II', 'A'),
+            makeStudentWithCode(3, 103, 'CSE', 'PE-I', 'PE-I', 'A'),
+            makeStudentWithCode(4, 104, 'CSE', 'PE-I', 'PE-I', 'A'),
+            // IT students with different electives
+            makeStudentWithCode(5, 201, 'IT', 'OE-I', 'OE-I', ''),
+            makeStudentWithCode(6, 202, 'IT', 'OE-I', 'OE-I', ''),
+        ];
+
+        const { allocations } = allocateSeats({
+            rooms,
+            students,
+            mode: 'DOUBLE',
+            allocationMethod: 'LINEAR'
+        });
+
+        expect(allocations.length).toBe(6);
+
+        // Check that different subjects are paired on the same bench
+        const benches = {};
+        allocations.forEach(a => {
+            const key = `${a.roomId}-${a.rowNumber}-${a.columnNumber}`;
+            if (!benches[key]) benches[key] = [];
+            benches[key].push(a.subjectName);
+        });
+
+        // Each bench with 2 students should have different subjects
+        Object.values(benches).forEach(subjects => {
+            if (subjects.length === 2) {
+                expect(subjects[0]).not.toBe(subjects[1]);
+            }
+        });
+    });
+
+    test('LINEAR mode groups students by branch then by subject_code', () => {
+        const rooms = [{ id: 1, room_code: 'R1', rows: 10, columns: 1 }];
+
+        const students = [
+            // IT students (should come after CSE alphabetically)
+            makeStudentWithCode(5, 201, 'IT', 'Data Science', 'DS-101', ''),
+            // CSE-B students
+            makeStudentWithCode(3, 121, 'CSE', 'ML', 'ML-101', 'B'),
+            // CSE-A students
+            makeStudentWithCode(1, 101, 'CSE', 'Networks', 'NET-101', 'A'),
+            makeStudentWithCode(2, 102, 'CSE', 'AI', 'AI-101', 'A'),
+            makeStudentWithCode(4, 111, 'CSE', 'AI', 'AI-101', 'A'),
+        ];
+
+        const { allocations } = allocateSeats({
+            rooms,
+            students: students.slice().reverse(), // Reverse to test ordering
+            mode: 'SINGLE',
+            allocationMethod: 'LINEAR'
+        });
+
+        // CSE-A should come before CSE-B, and both before IT
+        const branches = allocations.map(a => `${a.branchCode}${a.branchSection ? '-' + a.branchSection : ''}`);
+
+        // Find indices
+        const cseAIndices = branches.map((b, i) => b.startsWith('CSE-A') ? i : -1).filter(i => i >= 0);
+        const cseBIndices = branches.map((b, i) => b.startsWith('CSE-B') ? i : -1).filter(i => i >= 0);
+        const itIndices = branches.map((b, i) => b === 'IT' ? i : -1).filter(i => i >= 0);
+
+        // All CSE-A before any CSE-B
+        if (cseAIndices.length && cseBIndices.length) {
+            expect(Math.max(...cseAIndices)).toBeLessThan(Math.min(...cseBIndices));
+        }
+        // All CSE before IT
+        const allCseIndices = [...cseAIndices, ...cseBIndices];
+        if (allCseIndices.length && itIndices.length) {
+            expect(Math.max(...allCseIndices)).toBeLessThan(Math.min(...itIndices));
+        }
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  EFFECTIVE CAPACITY — TESTS
+// ═══════════════════════════════════════════════════════════════
+
+describe('Effective Capacity', () => {
+    const RoomModel = require('../server/models/Room');
+
+    test('getSeatCount returns effective_capacity when set', () => {
+        const room = {
+            id: 1,
+            rows: 10,
+            columns: 6,
+            total_capacity: 60,
+            effective_capacity: 30
+        };
+
+        // SINGLE mode
+        expect(RoomModel.getSeatCount(room, 'SINGLE')).toBe(30);
+
+        // DOUBLE mode - effective capacity is per-bench count
+        expect(RoomModel.getSeatCount(room, 'DOUBLE')).toBe(60);
+    });
+
+    test('getSeatCount returns total_capacity when effective_capacity is null', () => {
+        const room = {
+            id: 1,
+            rows: 10,
+            columns: 6,
+            total_capacity: 60,
+            effective_capacity: null
+        };
+
+        expect(RoomModel.getSeatCount(room, 'SINGLE')).toBe(60);
+        expect(RoomModel.getSeatCount(room, 'DOUBLE')).toBe(120);
+    });
+
+    test('getSeatCount handles undefined effective_capacity', () => {
+        const room = {
+            id: 1,
+            rows: 10,
+            columns: 6,
+            total_capacity: 60
+            // effective_capacity not set
+        };
+
+        expect(RoomModel.getSeatCount(room, 'SINGLE')).toBe(60);
+    });
+
+    test('allocation respects effective_capacity limit in SINGLE mode', () => {
+        // Room has 6 benches (2x3) but effective_capacity is 4
+        const rooms = [{
+            id: 1,
+            room_code: 'R1',
+            rows: 2,
+            columns: 3,
+            effective_capacity: 4
+        }];
+
+        // 6 students but only 4 seats available due to effective_capacity
+        const students = [];
+        for (let i = 1; i <= 6; i++) {
+            students.push({
+                id: i,
+                roll_number: String(100 + i),
+                branch_code: 'CSE',
+                subject_name: 'DS',
+                branch_id: 1,
+                subject_id: 1
+            });
+        }
+
+        const { allocations, report } = allocateSeats({
+            rooms,
+            students,
+            mode: 'SINGLE',
+            allocationMethod: 'INTERLEAVED'
+        });
+
+        // Only 4 students should be allocated (not 6)
+        expect(report.assignedCount).toBe(4);
+        expect(report.unassignedCount).toBe(2);
+        expect(report.totalSeats).toBe(4);
+        expect(allocations).toHaveLength(4);
+    });
+
+    test('allocation respects effective_capacity limit in DOUBLE mode', () => {
+        // Room has 6 benches (2x3) but effective_capacity is 3
+        // In DOUBLE mode, 3 benches = 6 seats
+        const rooms = [{
+            id: 1,
+            room_code: 'R1',
+            rows: 2,
+            columns: 3,
+            effective_capacity: 3
+        }];
+
+        // 8 students with 2 different subjects
+        const students = [];
+        for (let i = 1; i <= 4; i++) {
+            students.push({
+                id: i,
+                roll_number: String(100 + i),
+                branch_code: 'CSE',
+                subject_name: 'DS',
+                branch_id: 1,
+                subject_id: 1
+            });
+        }
+        for (let i = 5; i <= 8; i++) {
+            students.push({
+                id: i,
+                roll_number: String(100 + i),
+                branch_code: 'IT',
+                subject_name: 'OS',
+                branch_id: 2,
+                subject_id: 2
+            });
+        }
+
+        const { allocations, report } = allocateSeats({
+            rooms,
+            students,
+            mode: 'DOUBLE',
+            allocationMethod: 'INTERLEAVED'
+        });
+
+        // Only 6 students should be allocated (3 benches * 2 seats)
+        expect(report.assignedCount).toBe(6);
+        expect(report.unassignedCount).toBe(2);
+        expect(report.totalSeats).toBe(6);
+    });
+
+    test('allocation without effective_capacity uses full capacity', () => {
+        // Room has 6 benches (2x3), no effective_capacity set
+        const rooms = [{
+            id: 1,
+            room_code: 'R1',
+            rows: 2,
+            columns: 3
+            // No effective_capacity
+        }];
+
+        const students = [];
+        for (let i = 1; i <= 6; i++) {
+            students.push({
+                id: i,
+                roll_number: String(100 + i),
+                branch_code: 'CSE',
+                subject_name: 'DS',
+                branch_id: 1,
+                subject_id: 1
+            });
+        }
+
+        const { allocations, report } = allocateSeats({
+            rooms,
+            students,
+            mode: 'SINGLE',
+            allocationMethod: 'INTERLEAVED'
+        });
+
+        // All 6 students should be allocated
+        expect(report.assignedCount).toBe(6);
+        expect(report.unassignedCount).toBe(0);
+        expect(report.totalSeats).toBe(6);
+    });
+});

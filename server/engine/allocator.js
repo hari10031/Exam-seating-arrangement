@@ -105,8 +105,8 @@ function allocateSeats({ rooms, students, mode, allocationMethod = 'INTERLEAVED'
 // ═══════════════════════════════════════════════════════════════
 
 function allocateSingle(rooms, students) {
-    // 1. Total available seats (1 per bench)
-    const totalSeats = rooms.reduce((sum, r) => sum + r.rows * r.columns, 0);
+    // 1. Total available seats (1 per bench), respecting effective_capacity
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r), 0);
 
     // 2. Group students by subject, sort each group by roll number
     const subjectGroups = groupBySubject(students);
@@ -165,8 +165,8 @@ function allocateSingle(rooms, students) {
 // ═══════════════════════════════════════════════════════════════
 
 function allocateDouble(rooms, students) {
-    // 1. Total available seats (2 per bench)
-    const totalSeats = rooms.reduce((sum, r) => sum + r.rows * r.columns * 2, 0);
+    // 1. Total available seats (2 per bench), respecting effective_capacity
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r) * 2, 0);
 
     // 2. Group students by subject
     const subjectGroups = groupBySubject(students);
@@ -288,16 +288,49 @@ function allocateDouble(rooms, students) {
 // ═══════════════════════════════════════════════════════════════
 
 function allocateLinearSingle(rooms, students) {
-    const totalSeats = rooms.reduce((sum, r) => sum + r.rows * r.columns, 0);
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r), 0);
 
-    // Group by branch, sort each group by roll number
-    const branchGroups = groupByBranch(students);
-    const branchOrder = Object.keys(branchGroups).sort();
+    // Group by branch+subject for proper elective handling
+    const branchSubjectGroups = {};
+    for (const s of students) {
+        const section = s.branch_section || '';
+        const branchKey = section ? `${s.branch_code}-${section}` : s.branch_code;
+        const key = `${branchKey}::${s.subject_name || 'NONE'}`;
+        if (!branchSubjectGroups[key]) branchSubjectGroups[key] = [];
+        branchSubjectGroups[key].push(s);
+    }
 
-    // Build a single linear queue: branch A students, then B, then C...
+    // Sort students within each group by roll number
+    for (const key of Object.keys(branchSubjectGroups)) {
+        branchSubjectGroups[key].sort((a, b) => {
+            const ra = parseInt(a.roll_number, 10);
+            const rb = parseInt(b.roll_number, 10);
+            if (!isNaN(ra) && !isNaN(rb)) return ra - rb;
+            return String(a.roll_number).localeCompare(String(b.roll_number));
+        });
+    }
+
+    // Sort groups by branch first, then by subject_code for proper elective ordering
+    const groupOrder = Object.keys(branchSubjectGroups).sort((keyA, keyB) => {
+        const [branchA, subjectA] = keyA.split('::');
+        const [branchB, subjectB] = keyB.split('::');
+
+        // First sort by branch
+        const branchCmp = branchA.localeCompare(branchB);
+        if (branchCmp !== 0) return branchCmp;
+
+        // Then sort by subject_code if available, otherwise by subject_name
+        const grpA = branchSubjectGroups[keyA];
+        const grpB = branchSubjectGroups[keyB];
+        const codeA = (grpA[0] && grpA[0].subject_code) || subjectA || '';
+        const codeB = (grpB[0] && grpB[0].subject_code) || subjectB || '';
+        return codeA.localeCompare(codeB);
+    });
+
+    // Build a single linear queue: branch-subject groups in sorted order
     const queue = [];
-    for (const branch of branchOrder) {
-        queue.push(...branchGroups[branch]);
+    for (const key of groupOrder) {
+        queue.push(...branchSubjectGroups[key]);
     }
 
     // Build seat list across all rooms
@@ -371,7 +404,7 @@ function allocateLinearSingle(rooms, students) {
 // ═══════════════════════════════════════════════════════════════
 
 function allocateLinearDouble(rooms, students) {
-    const totalSeats = rooms.reduce((sum, r) => sum + r.rows * r.columns * 2, 0);
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r) * 2, 0);
 
     // Group by branch+section+subject so that the same branch with different elective
     // subjects gets separate queues that can be paired together.
@@ -391,7 +424,25 @@ function allocateLinearDouble(rooms, students) {
             return String(a.roll_number).localeCompare(String(b.roll_number));
         });
     }
-    const groupOrder = Object.keys(branchSubjectGroups).sort();
+
+    // Sort groups by branch first, then by subject_code for proper elective ordering
+    // This ensures PE-I comes before PE-II, OE-I before OE-II, etc.
+    const groupOrder = Object.keys(branchSubjectGroups).sort((keyA, keyB) => {
+        const [branchA, subjectA] = keyA.split('::');
+        const [branchB, subjectB] = keyB.split('::');
+
+        // First sort by branch
+        const branchCmp = branchA.localeCompare(branchB);
+        if (branchCmp !== 0) return branchCmp;
+
+        // Then sort by subject_code if available, otherwise by subject_name
+        // Get subject_code from first student in each group
+        const grpA = branchSubjectGroups[keyA];
+        const grpB = branchSubjectGroups[keyB];
+        const codeA = (grpA[0] && grpA[0].subject_code) || subjectA || '';
+        const codeB = (grpB[0] && grpB[0].subject_code) || subjectB || '';
+        return codeA.localeCompare(codeB);
+    });
 
     // Build ordered queues, recording each group's subject
     const queues = groupOrder.map(key => {
@@ -610,9 +661,22 @@ function roundRobinInterleave(subjectGroups) {
 // ═══════════════════════════════════════════════════════════════
 
 /**
+ * Get the effective bench count for a room.
+ * Uses effective_capacity if set, otherwise rows * columns.
+ */
+function getEffectiveBenchCount(room) {
+    const totalBenches = room.rows * room.columns;
+    if (room.effective_capacity !== null && room.effective_capacity !== undefined) {
+        return Math.min(room.effective_capacity, totalBenches);
+    }
+    return totalBenches;
+}
+
+/**
  * Generate an ordered list of bench slots across all rooms.
  * Each slot: { roomId, row, col }
  * Order: room alphabetically → row 1..R → col 1..C
+ * Respects effective_capacity: only generates slots up to the limit.
  */
 function buildSeatSlots(rooms, mode) {
     const slots = [];
@@ -620,14 +684,20 @@ function buildSeatSlots(rooms, mode) {
     const sorted = [...rooms].sort((a, b) => a.room_code.localeCompare(b.room_code));
 
     for (const room of sorted) {
+        const effectiveBenches = getEffectiveBenchCount(room);
+        let benchCount = 0;
+
+        outerLoop:
         for (let r = 1; r <= room.rows; r++) {
             for (let c = 1; c <= room.columns; c++) {
+                if (benchCount >= effectiveBenches) break outerLoop;
                 slots.push({
                     roomId: room.id,
                     roomCode: room.room_code,
                     row: r,
                     col: c
                 });
+                benchCount++;
             }
         }
     }

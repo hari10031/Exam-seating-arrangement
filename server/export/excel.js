@@ -173,12 +173,18 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
 
     // ── COMMON DATA & HELPERS ──────────────────────────────────────────────────
 
-    // Derive semester label from year
+    // Derive semester label from year or use timetable semester
     const yearNum = Number(sessionInfo.year) || 0;
     const semLabels = { 1: 'I/II SEM', 2: 'III/IV SEM', 3: 'V/VI SEM', 4: 'VII/VIII SEM' };
-    const semLabel = semLabels[yearNum] || '';
+    const semLabel = sessionInfo.semester || semLabels[yearNum] || '';
     const examDate = sessionInfo.examDate || '';
     const timeSlot = sessionInfo.slot || '';
+    const cieType = sessionInfo.cieType || 'CIE-I'; // Dynamic CIE type
+    const academicYear = sessionInfo.academicYear || ''; // From timetable
+
+    // Roman numeral semester for branch labels (e.g., "VI" for semester 6)
+    const romanNumerals = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 7: 'VII', 8: 'VIII' };
+    const semRoman = sessionInfo.semester ? romanNumerals[Number(sessionInfo.semester)] || sessionInfo.semester : '';
 
     // Thin border helper
     const thinBorder = {
@@ -271,7 +277,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         row++;
         ws.mergeCells(row, 1, row, COLS);
         const cieCell = ws.getCell(row, 1);
-        cieCell.value = 'Continuous Internal Assessment (CIE)-I Attendance Statement';
+        cieCell.value = `Continuous Internal Assessment (${cieType}) Attendance Statement`;
         cieCell.font = { bold: true, size: 13 };
         cieCell.alignment = { horizontal: 'center', vertical: 'middle' };
         ws.getRow(row).height = 22;
@@ -281,7 +287,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         const infoStart = row;
         ws.getCell(row, 1).value = 'Subject';
         ws.getCell(row, 2).value = subjectName;
-        ws.getCell(row, 3).value = `Branch: BE (${branchLabel})`;
+        ws.getCell(row, 3).value = `Branch: BE (${branchLabel})${semRoman ? ' ' + semRoman : ''}`;
         // ws.getCell(row, 4).value = `BE (${branchLabel})`;
         // ws.getCell(row, 5).value = 'Total Students';
         ws.getCell(row, 4).value = `Total Students: `;
@@ -301,7 +307,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         ws.getCell(row, 1).value = 'Date';
         ws.getCell(row, 2).value = examDate;
         //Db change
-        ws.getCell(row, 3).value = 'Acadmeic Year';
+        ws.getCell(row, 3).value = academicYear ? `Academic Year: ${academicYear}` : 'Academic Year:';
         ws.getCell(row, 4).value = 'No of Students Absent';
         // ws.getCell(row, 4).value = roomCode;
         // ws.getCell(row, 5).value = 'No of Students Absent';
@@ -369,7 +375,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         row += 3;
         ws.getCell(row, 1).value = 'Invigilator Signature:';
         ws.getCell(row, 1).font = { bold: true, size: 11 };
-        ws.mergeCells(row, 2, row, 4);
+        ws.mergeCells(row, 1, row, 4);
         ws.getCell(row, 2).border = { bottom: { style: 'thin' } };
 
         row += 2;
@@ -462,7 +468,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         // Row 3: CIE Consolidated Attendance Statement
         row++;
         ws.mergeCells(row, 1, row, ROLL_COLS);
-        ws.getCell(row, 1).value = 'Continuous Internal Assessment (CIE)-I Consolidated Attendance Statement';
+        ws.getCell(row, 1).value = `Continuous Internal Assessment (${cieType}) Consolidated Attendance Statement`;
         ws.getCell(row, 1).font = { bold: true, size: 13 };
         ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle' };
         ws.getRow(row).height = 22;
@@ -472,7 +478,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         const ICOLS = 6;
         const infoStart = row;
         ws.getCell(row, 1).value = 'Branch';
-        ws.getCell(row, 2).value = `BE (${branchLabel})`;
+        ws.getCell(row, 2).value = `BE (${branchLabel})${semRoman ? ' ' + semRoman : ''}`;
         ws.getCell(row, 3).value = 'Total Students';
         ws.getCell(row, 4).value = totalStudents;
         // ws.getCell(row, 5).value = '';
@@ -649,7 +655,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         row++;
         ws.mergeCells(row, 1, row, COLS);
         const cieCell = ws.getCell(row, 1);
-        cieCell.value = 'Continuous Internal Assessment (CIE)-I Attendance Statement';
+        cieCell.value = `Continuous Internal Assessment (${cieType}) Attendance Statement`;
         cieCell.font = { bold: true, size: 13 };
         cieCell.alignment = { horizontal: 'center', vertical: 'middle' };
         ws.getRow(row).height = 22;
@@ -658,7 +664,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         row++;
         const infoStart = row;
         ws.getCell(row, 1).value = 'Branch';
-        ws.getCell(row, 2).value = `BE (${branchLabel})`;
+        ws.getCell(row, 2).value = `BE (${branchLabel})${semRoman ? ' ' + semRoman : ''}`;
         ws.getCell(row, 3).value = '';
         ws.getCell(row, 4).value = '';
         ws.getCell(row, 5).value = 'Total Students';
@@ -678,7 +684,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         ws.getCell(row, 3).value = '';
         ws.getCell(row, 4).value = '';
         //Db change
-        ws.getCell(row, 5).value = 'Acamdemic Year - 2025-2026';
+        ws.getCell(row, 5).value = academicYear ? `Academic Year: ${academicYear}` : 'Academic Year:';
         ws.getCell(row, 6).value = 'No of Students Absent';
 
         // Style info table

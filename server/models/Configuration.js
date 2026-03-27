@@ -196,17 +196,17 @@ const ConfigurationModel = {
 
     /**
      * Set exam timetable entries.
-     * Each entry: { year, branchId, subjectId, examDate, slot }
+     * Each entry: { year, branchId, subjectId, examDate, slot, timeSlot, semester, academicYear }
      */
     setExamTimetable(entries) {
         const db = getDb();
         const ins = db.prepare(`
-            INSERT OR REPLACE INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot, semester, academic_year)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `);
         const txn = db.transaction(() => {
             for (const e of entries) {
-                ins.run(e.year, e.branchId, e.subjectId, e.examDate, e.slot || null, e.timeSlot || null);
+                ins.run(e.year, e.branchId, e.subjectId, e.examDate, e.slot || null, e.timeSlot || null, e.semester || null, e.academicYear || null);
             }
         });
         txn();
@@ -218,12 +218,12 @@ const ConfigurationModel = {
     replaceExamTimetable(year, entries) {
         const db = getDb();
         const ins = db.prepare(`
-            INSERT OR REPLACE INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO exam_timetable (year, branch_id, subject_id, exam_date, slot, time_slot, semester, academic_year)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `);
         const txn = db.transaction(() => {
             for (const e of entries) {
-                ins.run(year, e.branchId, e.subjectId, e.examDate, e.slot || null, e.timeSlot || null);
+                ins.run(year, e.branchId, e.subjectId, e.examDate, e.slot || null, e.timeSlot || null, e.semester || null, e.academicYear || null);
             }
         });
         txn();
@@ -260,7 +260,7 @@ const ConfigurationModel = {
     getExamTimetableByYear(year) {
         const db = getDb();
         return db.prepare(`
-            SELECT et.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name
+            SELECT et.*, b.branch_code, b.branch_name, b.section as branch_section, s.subject_code, s.subject_name
             FROM exam_timetable et
             JOIN branches b ON b.id = et.branch_id
             JOIN subjects s ON s.id = et.subject_id
@@ -275,7 +275,7 @@ const ConfigurationModel = {
     getAllExamTimetable() {
         const db = getDb();
         return db.prepare(`
-            SELECT et.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name
+            SELECT et.*, b.branch_code, b.branch_name, b.section as branch_section, s.subject_code, s.subject_name
             FROM exam_timetable et
             JOIN branches b ON b.id = et.branch_id
             JOIN subjects s ON s.id = et.subject_id
@@ -380,14 +380,17 @@ const ConfigurationModel = {
 
     /**
      * Get roll numbers for a specific year and branch.
+     * When section is specified, returns students with that exact section
+     * PLUS students without a section (they belong to all sections).
      */
     getRollNumbers(year, branchCode, section) {
         const db = getDb();
         if (section !== undefined && section !== null && section !== '') {
+            // Include both: exact section match AND students without section
             return db.prepare(`
                 SELECT roll_number, student_name FROM student_master
                 WHERE year = ? AND UPPER(branch_code) = UPPER(?)
-                  AND COALESCE(section, '') = ?
+                  AND (COALESCE(section, '') = ? OR COALESCE(section, '') = '')
                 ORDER BY roll_number
             `).all(year, branchCode, section);
         }
@@ -427,32 +430,84 @@ const ConfigurationModel = {
      * Also performs name-based fallback matching to handle timetable subjects like:
      * "PE – II : Object Oriented System Development" vs
      * "Object Oriented System Development".
+     *
+     * Enhanced matching:
+     * 1. Exact subject_id match
+     * 2. Fuzzy substring match on subject_name
+     * 3. Extract short name from prefixes like "PE – II : ", "Professional Elective – II("
+     * 4. Abbreviation matching: "SPM" matches "Software Project Management"
      */
     getRollNumbersForElective(year, subjectId, branchCode = null, section = null) {
         const db = getDb();
+
+        // First get the target subject to extract short name
+        const targetSubject = db.prepare('SELECT subject_name, subject_code FROM subjects WHERE id = ?').get(subjectId);
+        if (!targetSubject) {
+            return [];
+        }
+
+        // Extract short name from patterns like:
+        // "PE – II : Object Oriented System Development" -> "Object Oriented System Development"
+        // "Professional Elective – II(Graph Theory)" -> "Graph Theory"
+        // "Open Elective - II : Entrepreneurship" -> "Entrepreneurship"
+        let shortName = targetSubject.subject_name;
+        const patterns = [
+            /^(?:PE|Professional Elective|Open Elective)\s*[-–]\s*(?:I{1,3}|[123])\s*[:：]\s*(.+)$/i,
+            /^(?:PE|Professional Elective|Open Elective)\s*[-–]\s*(?:I{1,3}|[123])\s*\((.+)\)$/i,
+            /^(?:PE|Professional Elective|Open Elective)\s*[-–]\s*(?:I{1,3}|[123])\s*(.+)$/i
+        ];
+        for (const pat of patterns) {
+            const match = targetSubject.subject_name.match(pat);
+            if (match) {
+                shortName = match[1].trim();
+                break;
+            }
+        }
+
+        // Check if shortName is an abbreviation (2-6 uppercase letters)
+        const isAbbreviation = /^[A-Z]{2,6}$/.test(shortName);
+
+        // If it's an abbreviation, find subjects where first letters of words match
+        let abbreviationMatchIds = [];
+        if (isAbbreviation) {
+            const allSubjects = db.prepare('SELECT id, subject_name FROM subjects').all();
+            for (const s of allSubjects) {
+                // Extract first letters of words
+                const words = s.subject_name.replace(/[^a-zA-Z\s]/g, '').split(/\s+/).filter(w => w.length > 0);
+                const abbr = words.map(w => w[0].toUpperCase()).join('');
+                if (abbr === shortName.toUpperCase()) {
+                    abbreviationMatchIds.push(s.id);
+                }
+            }
+        }
+
+        // Build query with multiple match conditions
         let sql = `
             SELECT DISTINCT se.roll_number, sm.student_name
             FROM student_electives se
             LEFT JOIN student_master sm ON sm.roll_number = se.roll_number
+            JOIN subjects s ON s.id = se.subject_id
             WHERE se.year = ?
               AND (
                 se.subject_id = ?
-                OR se.subject_id IN (
-                    SELECT s2.id
-                    FROM subjects s2
-                    JOIN subjects s1 ON s1.id = ?
-                    WHERE UPPER(TRIM(s1.subject_name)) LIKE '%' || UPPER(TRIM(s2.subject_name)) || '%'
-                       OR UPPER(TRIM(s2.subject_name)) LIKE '%' || UPPER(TRIM(s1.subject_name)) || '%'
-                )
-              )
+                OR UPPER(TRIM(s.subject_name)) LIKE '%' || UPPER(?) || '%'
+                OR UPPER(?) LIKE '%' || UPPER(TRIM(s.subject_name)) || '%'
         `;
-        const params = [year, subjectId, subjectId];
+        const params = [year, subjectId, shortName, shortName];
+
+        // Add abbreviation matches
+        if (abbreviationMatchIds.length > 0) {
+            sql += ` OR se.subject_id IN (${abbreviationMatchIds.join(',')})`;
+        }
+
+        sql += ')';
 
         if (branchCode) {
             sql += ` AND UPPER(COALESCE(sm.branch_code, '')) = UPPER(?)`;
             params.push(branchCode);
             if (section !== undefined && section !== null && section !== '') {
-                sql += ` AND COALESCE(sm.section, '') = ?`;
+                // Include both: exact section match AND students without section
+                sql += ` AND (COALESCE(sm.section, '') = ? OR COALESCE(sm.section, '') = '')`;
                 params.push(section);
             }
         }
@@ -473,6 +528,49 @@ const ConfigurationModel = {
             GROUP BY year
             ORDER BY year
         `).all();
+    },
+
+    /**
+     * Get semester and academic year from exam_timetable based on date, slot, and year.
+     * Returns the first matching values found in the timetable.
+     * @param {string} examDate - ISO date string
+     * @param {string} slot - Time slot (optional)
+     * @param {number} year - Academic year
+     * @returns {Object} { semester: string, academicYear: string }
+     */
+    getSessionInfoFromTimetable(examDate, slot, year) {
+        const db = getDb();
+        let sql = `
+            SELECT semester, academic_year FROM exam_timetable
+            WHERE exam_date = ? AND year = ?
+        `;
+        const params = [examDate, year];
+
+        if (slot) {
+            sql += ' AND slot = ?';
+            params.push(slot);
+        }
+
+        sql += ' LIMIT 1';
+
+        const result = db.prepare(sql).get(...params);
+        return {
+            semester: result?.semester || '',
+            academicYear: result?.academic_year || ''
+        };
+    },
+
+    /**
+     * Get semester from exam_timetable based on date, slot, and year.
+     * Returns the first matching semester found in the timetable.
+     * @param {string} examDate - ISO date string
+     * @param {string} slot - Time slot (optional)
+     * @param {number} year - Academic year
+     * @returns {string} Semester string or empty string if not found
+     */
+    getSemesterFromTimetable(examDate, slot, year) {
+        const info = this.getSessionInfoFromTimetable(examDate, slot, year);
+        return info.semester;
     }
 };
 

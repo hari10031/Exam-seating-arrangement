@@ -92,6 +92,7 @@ router.post('/', (req, res) => {
 
                     const branchSubjectMap = new Map();
                     const studentEntryMap = new Map();
+                    const electiveWarnings = []; // Track electives with no matching students
                     const addMapping = (branchId, subjectId) => {
                         const key = `${branchId}-${subjectId}`;
                         if (!branchSubjectMap.has(key)) {
@@ -116,7 +117,7 @@ router.post('/', (req, res) => {
                     };
 
                     // Auto-populate students from student_master
-                    // For electives, fetch branch-scoped elective students and fallback to branch students if empty.
+                    // For electives, fetch branch-scoped elective students.
                     // For regular subjects, use section-aware student lists.
                     for (const e of canonicalEntries) {
                         const isElective = e.subject_type === 'PE' || e.subject_type === 'OE';
@@ -130,12 +131,13 @@ router.post('/', (req, res) => {
                                 e.branch_section || null
                             );
 
-                            // Fallback: if elective choices don't match imported timetable subject labels,
-                            // use the branch student list so session auto-populate still works.
+                            // Track electives with no students found (don't fallback to ALL branch students)
                             if (students.length === 0) {
-                                students = e.branch_section
-                                    ? ConfigurationModel.getRollNumbers(Number(year), e.branch_code, e.branch_section)
-                                    : ConfigurationModel.getRollNumbers(Number(year), e.branch_code);
+                                electiveWarnings.push({
+                                    branch: e.branch_code + (e.branch_section ? `-${e.branch_section}` : ''),
+                                    subject: e.subject_name || e.subject_code,
+                                    subjectId: e.subject_id
+                                });
                             }
 
                             addStudentRolls(e.branch_id, e.subject_id, students);
@@ -190,6 +192,13 @@ router.post('/', (req, res) => {
                     if (studentEntries.length > 0) {
                         ExamSessionModel.setStudentsFromDb(session.id, studentEntries);
                     }
+
+                    // Log warnings for electives with no matching students
+                    if (electiveWarnings.length > 0) {
+                        console.warn('Electives with no matching students:', electiveWarnings);
+                        // Store warnings in session meta for client
+                        session.electiveWarnings = electiveWarnings;
+                    }
                 }
             } catch (autoErr) {
                 console.error('Auto-map from timetable failed (non-fatal):', autoErr.message);
@@ -198,7 +207,12 @@ router.post('/', (req, res) => {
 
         // Return full session details so client sees the auto-mapped data
         const fullSession = ExamSessionModel.getFullDetails(session.id);
-        res.status(201).json(fullSession || session);
+        const response = fullSession || session;
+        // Include any elective warnings in response
+        if (session.electiveWarnings) {
+            response.electiveWarnings = session.electiveWarnings;
+        }
+        res.status(201).json(response);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -285,7 +299,8 @@ router.put('/:id/students', (req, res) => {
         if (!Array.isArray(entries)) {
             return res.status(400).json({ error: 'entries must be an array' });
         }
-        ExamSessionModel.setStudents(Number(req.params.id), entries);
+        // Clear existing students before adding new ones
+        ExamSessionModel.setStudents(Number(req.params.id), entries, true);
         const students = ExamSessionModel.getStudents(Number(req.params.id));
         res.json({ count: students.length, students });
     } catch (err) {
@@ -420,6 +435,9 @@ router.get('/:id/export/excel', async (req, res) => {
         const session = ExamSessionModel.getById(sessionId);
         if (!session) return res.status(404).json({ error: 'Session not found' });
 
+        // Get CIE type from query parameter (default to CIE-I)
+        const cieType = req.query.cieType || 'CIE-I';
+
         const allocations = AllocationModel.getBySession(sessionId);
         const rooms = ExamSessionModel.getRooms(sessionId);
         const report = AllocationModel.getReport(sessionId) || {
@@ -432,6 +450,15 @@ router.get('/:id/export/excel', async (req, res) => {
         // Build room-wise summary for the summary table
         const roomSummary = buildRoomWiseSummary(allocations, rooms);
 
+        // Auto-detect semester and academic year from timetable
+        let semester = '';
+        let academicYear = '';
+        if (session.exam_date && session.year) {
+            const ttInfo = ConfigurationModel.getSessionInfoFromTimetable(session.exam_date, session.slot, session.year);
+            semester = ttInfo.semester;
+            academicYear = ttInfo.academicYear;
+        }
+
         const buffer = await generateExcel({
             sessionName: session.session_name,
             allocations,
@@ -443,7 +470,10 @@ router.get('/:id/export/excel', async (req, res) => {
                 startTime: session.start_time || '',
                 endTime: session.end_time || '',
                 slot: session.slot || '',
-                year: session.year || ''
+                year: session.year || '',
+                cieType: cieType,
+                semester: semester,
+                academicYear: academicYear
             }
         });
 

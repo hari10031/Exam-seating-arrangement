@@ -68,7 +68,7 @@ export const sessionsApi = {
     getAllocations: (id) => api(`/sessions/${id}/allocations`),
     getRoomGrid: (id, roomId) => api(`/sessions/${id}/allocations/grid/${roomId}`),
     getReport: (id) => api(`/sessions/${id}/report`),
-    exportExcel: (id) => api(`/sessions/${id}/export/excel`),
+    exportExcel: (id, cieType) => api(`/sessions/${id}/export/excel${cieType ? `?cieType=${encodeURIComponent(cieType)}` : ''}`),
     exportPdf: (id) => api(`/sessions/${id}/export/pdf`),
 };
 
@@ -79,11 +79,19 @@ export const configApi = {
     detectColumns: (fileData) =>
         api('/config/xlsx/detect-columns', { method: 'POST', body: { fileData } }),
 
+    // Room XLSX import
+    importRooms: (data) =>
+        api('/config/rooms/import', { method: 'POST', body: data }),
+
     // Student master CRUD
     importStudents: (data) =>
         api('/config/students/import', { method: 'POST', body: data }),
     getStudents: (params) => {
         const qs = new URLSearchParams(params).toString();
+        return api(`/config/students?${qs}`);
+    },
+    getStudentsEnhanced: (params) => {
+        const qs = new URLSearchParams({ ...params, enhanced: 'true' }).toString();
         return api(`/config/students?${qs}`);
     },
     getStudentBranches: (year) =>

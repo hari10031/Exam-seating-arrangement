@@ -99,6 +99,14 @@ function initSchema(database) {
         }
     } catch (_) { /* column already exists */ }
 
+    // Migration: add semester column to exam_timetable if missing
+    try {
+        const ttCols2 = database.prepare("PRAGMA table_info(exam_timetable)").all();
+        if (!ttCols2.find(c => c.name === 'semester')) {
+            database.exec("ALTER TABLE exam_timetable ADD COLUMN semester TEXT");
+        }
+    } catch (_) { /* column already exists */ }
+
     // Migration: change exam_timetable UNIQUE constraint to include subject_id
     // SQLite doesn't support ALTER CONSTRAINT, so we recreate the table if needed
     try {
@@ -203,6 +211,22 @@ function initSchema(database) {
         const smCols2 = database.prepare("PRAGMA table_info(student_master)").all();
         if (!smCols2.find(c => c.name === 'section')) {
             database.exec("ALTER TABLE student_master ADD COLUMN section TEXT NOT NULL DEFAULT ''");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Migration: add effective_capacity column to rooms if missing
+    try {
+        const roomCols = database.prepare("PRAGMA table_info(rooms)").all();
+        if (!roomCols.find(c => c.name === 'effective_capacity')) {
+            database.exec("ALTER TABLE rooms ADD COLUMN effective_capacity INTEGER");
+        }
+    } catch (_) { /* column already exists */ }
+
+    // Migration: add academic_year column to exam_timetable if missing
+    try {
+        const ttCols3 = database.prepare("PRAGMA table_info(exam_timetable)").all();
+        if (!ttCols3.find(c => c.name === 'academic_year')) {
+            database.exec("ALTER TABLE exam_timetable ADD COLUMN academic_year TEXT");
         }
     } catch (_) { /* column already exists */ }
 }

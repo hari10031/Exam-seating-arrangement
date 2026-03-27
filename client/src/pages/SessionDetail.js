@@ -27,6 +27,10 @@ export default function SessionDetail() {
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
 
+    // CIE type export modal state
+    const [showCieModal, setShowCieModal] = useState(false);
+    const [selectedCieType, setSelectedCieType] = useState('CIE-I');
+
     // Multi-year branch-subject picker state
     const [configuredYears, setConfiguredYears] = useState([]);
     const [pickerYear, setPickerYear] = useState('');
@@ -35,6 +39,7 @@ export default function SessionDetail() {
     const [pickerBranchId, setPickerBranchId] = useState('');
     const [pickerSubjectId, setPickerSubjectId] = useState('');
     const [dbStudents, setDbStudents] = useState({});            // { "year-branchId": [...students] }
+    const [electiveMeta, setElectiveMeta] = useState({});        // { "key": { reason, ... } } for elective warnings
 
     const loadSession = useCallback(async () => {
         try {
@@ -81,16 +86,30 @@ export default function SessionDetail() {
                         const isElective = e.subjectType === 'PE' || e.subjectType === 'OE';
                         const k = isElective ? `${yr}-sub-${e.subjectId}-${e.branchId}` : `${yr}-${e.branchId}`;
                         try {
-                            const params = isElective
-                                ? { year: yr, subjectId: e.subjectId, branchId: e.branchId }
-                                : { year: yr, branchId: e.branchId };
-                            const studs = await configApi.getStudents(params);
-                            return { k, studs };
-                        } catch { return { k, studs: [] }; }
+                            let studs, meta = null;
+                            if (isElective) {
+                                // For electives, use enhanced API to get metadata about why list might be empty
+                                const result = await configApi.getStudentsEnhanced({ year: yr, subjectId: e.subjectId, branchId: e.branchId });
+                                if (result.students !== undefined) {
+                                    studs = result.students;
+                                    meta = result.meta;
+                                } else {
+                                    studs = result; // backward compat
+                                }
+                            } else {
+                                studs = await configApi.getStudents({ year: yr, branchId: e.branchId });
+                            }
+                            return { k, studs, meta };
+                        } catch { return { k, studs: [], meta: null }; }
                     })).then(results => {
-                        const updates = {};
-                        results.forEach(r => { updates[r.k] = r.studs; });
-                        setDbStudents(prev => ({ ...prev, ...updates }));
+                        const studentUpdates = {};
+                        const metaUpdates = {};
+                        results.forEach(r => {
+                            studentUpdates[r.k] = r.studs;
+                            if (r.meta) metaUpdates[r.k] = r.meta;
+                        });
+                        setDbStudents(prev => ({ ...prev, ...studentUpdates }));
+                        setElectiveMeta(prev => ({ ...prev, ...metaUpdates }));
                     });
                 }
             }
@@ -270,6 +289,7 @@ export default function SessionDetail() {
                 try {
                     if (isElective) {
                         const k = `${year}-sub-${m.subjectId}-${m.branchId}`;
+                        // For electives, only use elective-specific lookup (no fallback to all branch students)
                         const studs = await configApi.getStudents({ year, subjectId: m.subjectId, branchId: m.branchId });
                         setDbStudents(prev => ({ ...prev, [k]: studs }));
                     } else {
@@ -309,10 +329,12 @@ export default function SessionDetail() {
                 const key = isElective ? `${year}-sub-${e.subjectId}-${e.branchId}` : `${year}-${e.branchId}`;
                 if (!fetchedStudents[key]) {
                     try {
-                        const params = isElective
-                            ? { year, subjectId: e.subjectId, branchId: e.branchId }
-                            : { year, branchId: e.branchId };
-                        fetchedStudents[key] = await configApi.getStudents(params);
+                        if (isElective) {
+                            // For electives, only use elective-specific lookup (no fallback to all branch students)
+                            fetchedStudents[key] = await configApi.getStudents({ year, subjectId: e.subjectId, branchId: e.branchId });
+                        } else {
+                            fetchedStudents[key] = await configApi.getStudents({ year, branchId: e.branchId });
+                        }
                     } catch (fetchErr) {
                         console.error(`Failed to fetch students for year=${year}:`, fetchErr);
                         fetchedStudents[key] = [];
@@ -393,14 +415,19 @@ export default function SessionDetail() {
 
     const exportExcel = async () => {
         try {
-            const blob = await sessionsApi.exportExcel(sessionId);
+            const blob = await sessionsApi.exportExcel(sessionId, selectedCieType);
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
             a.download = `seating-${session.session_name.replace(/\s+/g, '_')}.xlsx`;
             a.click();
             URL.revokeObjectURL(url);
+            setShowCieModal(false);
         } catch (err) { setError(err.message); }
+    };
+
+    const handleExportClick = () => {
+        setShowCieModal(true);
     };
 
     const exportPdf = async () => {
@@ -707,6 +734,24 @@ export default function SessionDetail() {
                             const isElective = entry.subjectType === 'PE' || entry.subjectType === 'OE';
                             const key = isElective ? `${year}-sub-${entry.subjectId}-${entry.branchId}` : `${year}-${entry.branchId}`;
                             const branchStudents = dbStudents[key] || [];
+                            const meta = electiveMeta[key];
+
+                            // Build warning message based on metadata
+                            const getWarningMessage = () => {
+                                if (!isElective) {
+                                    return `No students found in database for ${entry.branchCode || 'this branch'} (Year ${year}). Import student data first.`;
+                                }
+                                if (meta) {
+                                    if (meta.reason === 'no_student_master') {
+                                        return `No students found for ${entry.branchCode} (Year ${year}). Import student master data first.`;
+                                    } else if (meta.reason === 'no_elective_imports') {
+                                        return `${entry.branchCode} has ${meta.studentMasterCount} students, but no elective choices imported. Import elective data for this branch.`;
+                                    } else if (meta.reason === 'no_match') {
+                                        return `No students chose "${meta.subjectName || entry.subjectName}". Students may have chosen different electives.`;
+                                    }
+                                }
+                                return `No students found for this elective. Import elective choices or check if students chose this subject.`;
+                            };
 
                             return (
                                 <div key={i} className="card" style={{ background: '#f8f9fb', boxShadow: 'none', padding: 16 }}>
@@ -718,6 +763,7 @@ export default function SessionDetail() {
                                             <span style={{ margin: '0 6px', color: '#999' }}>→</span>
                                             <strong>{entry.subjectName || `Subject ${entry.subjectId}`}</strong>
                                             {year && <span style={{ fontSize: 11, color: '#888', marginLeft: 8 }}>(Year {year})</span>}
+                                            {isElective && <span className="badge" style={{ marginLeft: 8, background: '#e8f5e9', color: '#2e7d32' }}>{entry.subjectType}</span>}
                                         </div>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                             {entry.savedCount > 0 && (
@@ -736,8 +782,7 @@ export default function SessionDetail() {
                                         </div>
                                     ) : (
                                         <div style={{ fontSize: 13, color: '#e65100', marginBottom: 8, background: '#fff3e0', padding: '6px 10px', borderRadius: 4 }}>
-                                            ⚠ No students found in database for {entry.branchCode || `Branch ${entry.branchId}`}
-                                            {year ? ` (Year ${year})` : ''}. Import student data for this branch first.
+                                            ⚠ {getWarningMessage()}
                                         </div>
                                     )}
 
@@ -876,7 +921,7 @@ export default function SessionDetail() {
                             </div>
                         ) : (
                             <div className="btn-group">
-                                <button className="btn btn-primary" onClick={exportExcel}>
+                                <button className="btn btn-primary" onClick={handleExportClick}>
                                     Download Excel (.xlsx)
                                 </button>
                                 <button className="btn btn-success" onClick={exportPdf}>
@@ -885,6 +930,44 @@ export default function SessionDetail() {
                             </div>
                         )}
                     </div>
+
+                    {/* CIE Type Selection Modal */}
+                    {showCieModal && (
+                        <div style={{
+                            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                            backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex',
+                            alignItems: 'center', justifyContent: 'center', zIndex: 1000
+                        }}>
+                            <div className="card" style={{
+                                minWidth: '400px', maxWidth: '500px', backgroundColor: 'white'
+                            }}>
+                                <h3>Select CIE Type</h3>
+                                <p style={{ color: '#666', marginBottom: '16px' }}>
+                                    Choose the CIE type to include in the Excel export headers:
+                                </p>
+                                <div className="form-group">
+                                    <label>CIE Type</label>
+                                    <select
+                                        value={selectedCieType}
+                                        onChange={e => setSelectedCieType(e.target.value)}
+                                        style={{ width: '100%', padding: '10px', fontSize: '16px' }}
+                                    >
+                                        <option value="CIE-I">CIE-I (First Internal)</option>
+                                        <option value="CIE-II">CIE-II (Second Internal)</option>
+                                        <option value="CIE-III">CIE-III (Third Internal)</option>
+                                    </select>
+                                </div>
+                                <div className="btn-group" style={{ marginTop: '20px' }}>
+                                    <button className="btn btn-primary" onClick={exportExcel}>
+                                        Download Excel
+                                    </button>
+                                    <button className="btn btn-outline" onClick={() => setShowCieModal(false)}>
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
         </div>

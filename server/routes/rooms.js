@@ -31,11 +31,19 @@ router.get('/:id', (req, res) => {
 // POST /api/rooms
 router.post('/', (req, res) => {
     try {
-        const { roomCode, rows, columns } = req.body;
+        const { roomCode, rows, columns, effectiveCapacity } = req.body;
         if (!roomCode || !rows || !columns) {
             return res.status(400).json({ error: 'roomCode, rows, and columns are required' });
         }
-        const room = RoomModel.create({ roomCode, rows: Number(rows), columns: Number(columns) });
+        const effCap = effectiveCapacity !== undefined && effectiveCapacity !== ''
+            ? Number(effectiveCapacity)
+            : null;
+        const room = RoomModel.create({
+            roomCode,
+            rows: Number(rows),
+            columns: Number(columns),
+            effectiveCapacity: effCap
+        });
         res.status(201).json(room);
     } catch (err) {
         if (err.message.includes('UNIQUE')) {
@@ -48,9 +56,15 @@ router.post('/', (req, res) => {
 // PUT /api/rooms/:id
 router.put('/:id', (req, res) => {
     try {
-        const { roomCode, rows, columns } = req.body;
+        const { roomCode, rows, columns, effectiveCapacity } = req.body;
+        const effCap = effectiveCapacity !== undefined && effectiveCapacity !== ''
+            ? Number(effectiveCapacity)
+            : null;
         const room = RoomModel.update(Number(req.params.id), {
-            roomCode, rows: Number(rows), columns: Number(columns)
+            roomCode,
+            rows: Number(rows),
+            columns: Number(columns),
+            effectiveCapacity: effCap
         });
         res.json(room);
     } catch (err) {

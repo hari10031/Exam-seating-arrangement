@@ -14,6 +14,7 @@ const { getDb } = require('../db/connection');
 const ConfigurationModel = require('../models/Configuration');
 const BranchModel = require('../models/Branch');
 const SubjectModel = require('../models/Subject');
+const RoomModel = require('../models/Room');
 
 // ═══════════════════════════════════════════════════════════════
 //  XLSX COLUMN DETECTION — Reads headers for user to pick columns
@@ -278,10 +279,14 @@ router.post('/students/import', async (req, res) => {
  *   or  ?year=2&subjectId=5  (for elective students only)
  * Get students from student_master, filtered by year and optionally branch.
  * When subjectId is provided, returns only students who chose that elective.
+ *
+ * Response format:
+ *   - Array of students (backward compatible)
+ *   - OR { students: [], meta: { ... } } when enhanced=true
  */
 router.get('/students', (req, res) => {
     try {
-        const { year, branch, branchId, subjectId } = req.query;
+        const { year, branch, branchId, subjectId, enhanced } = req.query;
 
         const db = getDb();
 
@@ -296,12 +301,49 @@ router.get('/students', (req, res) => {
         // If subjectId provided, return only students who chose that elective.
         // When branch/branchId is provided, scope results to that branch+section.
         if (year && subjectId) {
-            res.json(ConfigurationModel.getRollNumbersForElective(
+            const students = ConfigurationModel.getRollNumbersForElective(
                 Number(year),
                 Number(subjectId),
                 branchCode || null,
                 section
-            ));
+            );
+
+            // Enhanced mode: provide metadata about why list might be empty
+            if (enhanced === 'true' && students.length === 0 && branchCode) {
+                // Check if branch has students in student_master
+                const masterCount = db.prepare(
+                    'SELECT COUNT(*) as cnt FROM student_master WHERE year = ? AND UPPER(branch_code) = UPPER(?)'
+                ).get(Number(year), branchCode);
+
+                // Check if branch has any elective choices
+                const electiveCount = db.prepare(`
+                    SELECT COUNT(*) as cnt FROM student_electives se
+                    JOIN student_master sm ON sm.roll_number = se.roll_number
+                    WHERE se.year = ? AND UPPER(sm.branch_code) = UPPER(?)
+                `).get(Number(year), branchCode);
+
+                // Get subject name for better messaging
+                const subject = db.prepare('SELECT subject_name FROM subjects WHERE id = ?').get(Number(subjectId));
+
+                res.json({
+                    students: [],
+                    meta: {
+                        hasStudentMaster: masterCount.cnt > 0,
+                        studentMasterCount: masterCount.cnt,
+                        hasElectiveChoices: electiveCount.cnt > 0,
+                        electiveChoicesCount: electiveCount.cnt,
+                        subjectName: subject?.subject_name || '',
+                        reason: masterCount.cnt === 0
+                            ? 'no_student_master'
+                            : electiveCount.cnt === 0
+                                ? 'no_elective_imports'
+                                : 'no_match'
+                    }
+                });
+                return;
+            }
+
+            res.json(students);
             return;
         }
 
@@ -849,9 +891,11 @@ router.post('/timetable/import', async (req, res) => {
     try {
         const { fileData, year, columnMapping, sheetName, headerRow, createMissing } = req.body;
         if (!fileData) return res.status(400).json({ error: 'fileData is required' });
-        if (!year) return res.status(400).json({ error: 'year is required' });
         if (!columnMapping || !columnMapping.branch || !columnMapping.subjectCode || !columnMapping.examDate) {
             return res.status(400).json({ error: 'columnMapping with branch, subjectCode, examDate is required' });
+        }
+        if (!year && !columnMapping.year) {
+            return res.status(400).json({ error: 'year is required (or map an Academic Year column)' });
         }
 
         const buffer = Buffer.from(fileData, 'base64');
@@ -900,12 +944,24 @@ router.post('/timetable/import', async (req, res) => {
                 const branchRaw = String(row.getCell(columnMapping.branch).value || '').trim();
                 const subjectCode = String(row.getCell(columnMapping.subjectCode).value || '').trim();
                 let examDate = row.getCell(columnMapping.examDate).value;
+                const rowYearRaw = columnMapping.year
+                    ? String(row.getCell(columnMapping.year).value || '').trim() : '';
+                const rowYear = columnMapping.year ? Number(rowYearRaw) : Number(year);
                 const slot = columnMapping.slot
                     ? String(row.getCell(columnMapping.slot).value || '').trim() : null;
                 const timeSlot = columnMapping.time
                     ? String(row.getCell(columnMapping.time).value || '').trim() : null;
+                const semester = columnMapping.semester
+                    ? String(row.getCell(columnMapping.semester).value || '').trim() : null;
+                const academicYear = columnMapping.academicYear
+                    ? String(row.getCell(columnMapping.academicYear).value || '').trim() : null;
 
                 if (!branchRaw || !subjectCode || !examDate) return;
+                if (!rowYear || rowYear < 1 || rowYear > 6) {
+                    result.skipped++;
+                    result.errors.push({ subjectCode, reason: `Invalid academic year: ${rowYearRaw || rowYear}` });
+                    return;
+                }
                 // Skip placeholder/empty subjects like \"-\"
                 if (subjectCode === '-' || subjectCode === '\u2014') return;
 
@@ -956,12 +1012,14 @@ router.post('/timetable/import', async (req, res) => {
                 // Create timetable entry for EACH section of this branch
                 for (const branch of branches) {
                     entries.push({
-                        year: Number(year),
+                        year: rowYear,
                         branchId: branch.id,
                         subjectId: subject.id,
                         examDate,
                         slot,
-                        timeSlot
+                        timeSlot,
+                        semester,
+                        academicYear
                     });
                 }
                 result.imported++;
@@ -979,7 +1037,15 @@ router.post('/timetable/import', async (req, res) => {
         }
 
         if (entries.length > 0) {
-            ConfigurationModel.replaceExamTimetable(Number(year), entries);
+            // Replace per year so mapped Academic Year data can contain multiple years.
+            const byYear = new Map();
+            for (const e of entries) {
+                if (!byYear.has(e.year)) byYear.set(e.year, []);
+                byYear.get(e.year).push(e);
+            }
+            for (const [yr, yrEntries] of byYear.entries()) {
+                ConfigurationModel.replaceExamTimetable(Number(yr), yrEntries);
+            }
         }
 
         res.json(result);
@@ -1072,6 +1138,108 @@ router.delete('/timetable/:year', (req, res) => {
 //  RESET DATABASE — Delete all data from all tables
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+//  ROOMS XLSX IMPORT
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/config/rooms/import
+ * Body: {
+ *   fileData: "base64-encoded-xlsx",
+ *   columnMapping: { roomCode: colNum, rows: colNum, columns: colNum, effectiveCapacity?: colNum },
+ *   sheetName?: string
+ * }
+ * Returns: { success: true, created: number, updated: number, errors: string[] }
+ */
+router.post('/rooms/import', async (req, res) => {
+    try {
+        const { fileData, columnMapping, sheetName } = req.body;
+        if (!fileData) return res.status(400).json({ error: 'fileData (base64) is required' });
+        if (!columnMapping || !columnMapping.roomCode || !columnMapping.rows || !columnMapping.columns) {
+            return res.status(400).json({ error: 'columnMapping with roomCode, rows, columns is required' });
+        }
+
+        const buffer = Buffer.from(fileData, 'base64');
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+
+        // Find the target sheet
+        let worksheet;
+        if (sheetName) {
+            worksheet = workbook.worksheets.find(ws => ws.name === sheetName);
+        }
+        if (!worksheet) {
+            worksheet = workbook.worksheets[0];
+        }
+        if (!worksheet) {
+            return res.status(400).json({ error: 'No worksheet found in the XLSX file' });
+        }
+
+        // Find header row (first row with non-empty cells)
+        let headerRowNum = 1;
+        for (let r = 1; r <= Math.min(10, worksheet.rowCount); r++) {
+            const row = worksheet.getRow(r);
+            let hasContent = false;
+            row.eachCell((cell) => {
+                const val = String(cell.value || '').trim().toLowerCase();
+                if (val.includes('room') || val.includes('code') || val.includes('row') || val.includes('column')) {
+                    hasContent = true;
+                }
+            });
+            if (hasContent) {
+                headerRowNum = r;
+                break;
+            }
+        }
+
+        // Parse rooms from XLSX
+        const rooms = [];
+        for (let r = headerRowNum + 1; r <= worksheet.rowCount; r++) {
+            const row = worksheet.getRow(r);
+            const roomCode = String(row.getCell(columnMapping.roomCode).value || '').trim();
+            const rowsVal = row.getCell(columnMapping.rows).value;
+            const colsVal = row.getCell(columnMapping.columns).value;
+            const effCapVal = columnMapping.effectiveCapacity
+                ? row.getCell(columnMapping.effectiveCapacity).value
+                : null;
+
+            if (!roomCode) continue; // Skip empty rows
+
+            const rowsNum = Number(rowsVal);
+            const colsNum = Number(colsVal);
+            const effCapNum = effCapVal ? Number(effCapVal) : null;
+
+            if (isNaN(rowsNum) || isNaN(colsNum) || rowsNum <= 0 || colsNum <= 0) {
+                continue; // Skip invalid rows
+            }
+
+            rooms.push({
+                roomCode,
+                rows: rowsNum,
+                columns: colsNum,
+                effectiveCapacity: effCapNum
+            });
+        }
+
+        if (rooms.length === 0) {
+            return res.status(400).json({ error: 'No valid room data found in the XLSX file' });
+        }
+
+        // Bulk import rooms
+        const result = RoomModel.bulkImport(rooms);
+
+        res.json({
+            success: true,
+            created: result.created,
+            updated: result.updated,
+            errors: result.errors,
+            totalProcessed: rooms.length
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 /**
  * DELETE /api/config/reset
  * Deletes all data from every table in the database.
@@ -1107,6 +1275,69 @@ router.delete('/reset', (req, res) => {
         deleteAll();
 
         res.json({ success: true, message: 'All database data has been deleted' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/config/diagnostics/elective-mismatch
+ * Check for mismatches between timetable elective subjects and student elective choices.
+ */
+router.get('/diagnostics/elective-mismatch', (req, res) => {
+    try {
+        const db = getDb();
+        const { year } = req.query;
+        const yearNum = year ? Number(year) : null;
+
+        // Get all PE/OE subjects from timetable
+        let timetableSql = `
+            SELECT DISTINCT et.subject_id, s.subject_code, s.subject_name, et.year,
+                   GROUP_CONCAT(DISTINCT b.branch_code) as branches
+            FROM exam_timetable et
+            JOIN subjects s ON s.id = et.subject_id
+            JOIN branches b ON b.id = et.branch_id
+            JOIN year_branch_subjects ybs
+              ON ybs.year = et.year AND ybs.branch_id = et.branch_id AND ybs.subject_id = et.subject_id
+            WHERE ybs.subject_type IN ('PE', 'OE')
+        `;
+        if (yearNum) timetableSql += ` AND et.year = ${yearNum}`;
+        timetableSql += ` GROUP BY et.subject_id ORDER BY et.year, s.subject_name`;
+        const timetableElectives = db.prepare(timetableSql).all();
+
+        // Get all student elective choices
+        let studentSql = `
+            SELECT DISTINCT se.subject_id, s.subject_code, s.subject_name, se.year,
+                   COUNT(DISTINCT se.roll_number) as student_count
+            FROM student_electives se
+            JOIN subjects s ON s.id = se.subject_id
+        `;
+        if (yearNum) studentSql += ` WHERE se.year = ${yearNum}`;
+        studentSql += ` GROUP BY se.subject_id ORDER BY se.year, s.subject_name`;
+        const studentElectives = db.prepare(studentSql).all();
+
+        // Find mismatches
+        const timetableSubjectIds = new Set(timetableElectives.map(t => t.subject_id));
+        const studentSubjectIds = new Set(studentElectives.map(s => s.subject_id));
+
+        const mismatches = {
+            inTimetableOnly: timetableElectives.filter(t => !studentSubjectIds.has(t.subject_id)),
+            inStudentElectivesOnly: studentElectives.filter(s => !timetableSubjectIds.has(s.subject_id)),
+            matched: timetableElectives.filter(t => studentSubjectIds.has(t.subject_id))
+        };
+
+        res.json({
+            timetableElectives,
+            studentElectives,
+            mismatches,
+            summary: {
+                timetableCount: timetableElectives.length,
+                studentElectiveCount: studentElectives.length,
+                matchedCount: mismatches.matched.length,
+                inTimetableOnlyCount: mismatches.inTimetableOnly.length,
+                inStudentElectivesOnlyCount: mismatches.inStudentElectivesOnly.length
+            }
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS rooms (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     room_code   TEXT    NOT NULL UNIQUE,          -- e.g. "AS201"
     total_capacity INTEGER NOT NULL,              -- derived: rows * columns * seats_per_bench
+    effective_capacity INTEGER,                   -- user-defined limit (can be less than total_capacity)
     rows        INTEGER NOT NULL CHECK (rows > 0),
     columns     INTEGER NOT NULL CHECK (columns > 0),  -- each column = 1 bench
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -78,6 +79,8 @@ CREATE TABLE IF NOT EXISTS student_electives (
 CREATE TABLE IF NOT EXISTS exam_timetable (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     year        INTEGER NOT NULL,
+    semester    TEXT,
+    academic_year TEXT,                 -- e.g. "2025-26", "2024-25"
     branch_id   INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
     subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     exam_date   TEXT    NOT NULL,       -- ISO date

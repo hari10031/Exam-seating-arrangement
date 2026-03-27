@@ -75,8 +75,10 @@ const ExamSessionModel = {
 
     assignRooms(sessionId, roomIds) {
         const db = getDb();
-        const ins = db.prepare('INSERT OR IGNORE INTO session_rooms (session_id, room_id) VALUES (?, ?)');
+        const del = db.prepare('DELETE FROM session_rooms WHERE session_id = ?');
+        const ins = db.prepare('INSERT INTO session_rooms (session_id, room_id) VALUES (?, ?)');
         const txn = db.transaction(() => {
+            del.run(sessionId); // Clear existing rooms first
             for (const roomId of roomIds) {
                 ins.run(sessionId, roomId);
             }
@@ -98,11 +100,13 @@ const ExamSessionModel = {
 
     assignBranchSubjects(sessionId, mappings) {
         const db = getDb();
+        const del = db.prepare('DELETE FROM session_branch_subjects WHERE session_id = ?');
         const ins = db.prepare(`
-      INSERT OR IGNORE INTO session_branch_subjects (session_id, branch_id, subject_id)
+      INSERT INTO session_branch_subjects (session_id, branch_id, subject_id)
       VALUES (?, ?, ?)
     `);
         const txn = db.transaction(() => {
+            del.run(sessionId); // Clear existing mappings first
             for (const { branchId, subjectId } of mappings) {
                 ins.run(sessionId, branchId, subjectId);
             }
@@ -130,17 +134,31 @@ const ExamSessionModel = {
     // ─── STUDENTS ───────────────────────────────────────────────
 
     /**
+     * Clear all students for a session.
+     * @param {number} sessionId
+     */
+    clearStudents(sessionId) {
+        const db = getDb();
+        db.prepare('DELETE FROM students WHERE session_id = ?').run(sessionId);
+    },
+
+    /**
      * Expand roll-number ranges → individual student rows.
      * @param {number} sessionId
      * @param {Array<{branchId, subjectId, ranges: [{start,end}], exclude: (string|number)[], include: (string|number)[]}>} entries
+     * @param {boolean} clearFirst - Whether to clear existing students first (default: false for backward compat)
      */
-    setStudents(sessionId, entries) {
+    setStudents(sessionId, entries, clearFirst = false) {
         const db = getDb();
+        const del = db.prepare('DELETE FROM students WHERE session_id = ?');
         const ins = db.prepare(`
       INSERT OR IGNORE INTO students (session_id, branch_id, subject_id, roll_number)
       VALUES (?, ?, ?, ?)
     `);
         const txn = db.transaction(() => {
+            if (clearFirst) {
+                del.run(sessionId);
+            }
             for (const entry of entries) {
                 const rollSet = expandRolls(entry.ranges, entry.exclude, entry.include);
                 for (const roll of rollSet) {
@@ -155,9 +173,11 @@ const ExamSessionModel = {
      * Set students from the student_master DB instead of roll ranges.
      * @param {number} sessionId
      * @param {Array<{branchId, subjectId, rollNumbers: string[], exclude: string[]}>} entries
+     * @param {boolean} clearFirst - Whether to clear existing students first (default: true)
      */
-    setStudentsFromDb(sessionId, entries) {
+    setStudentsFromDb(sessionId, entries, clearFirst = true) {
         const db = getDb();
+        const del = db.prepare('DELETE FROM students WHERE session_id = ?');
         const ins = db.prepare(`
       INSERT OR IGNORE INTO students (session_id, branch_id, subject_id, roll_number, student_name)
       VALUES (?, ?, ?, ?, ?)
@@ -174,6 +194,9 @@ const ExamSessionModel = {
         const sectionBranchCache = {};
 
         const txn = db.transaction(() => {
+            if (clearFirst) {
+                del.run(sessionId); // Clear existing students first
+            }
             for (const entry of entries) {
                 const excludeSet = new Set((entry.exclude || []).map(r => String(r).trim()));
                 const rolls = (entry.rollNumbers || []).filter(r => !excludeSet.has(String(r).trim()));
@@ -214,7 +237,7 @@ const ExamSessionModel = {
     getStudents(sessionId) {
         const db = getDb();
         return db.prepare(`
-      SELECT st.*, b.branch_code, b.section as branch_section, s.subject_name
+      SELECT st.*, b.branch_code, b.section as branch_section, s.subject_name, s.subject_code
       FROM students st
       JOIN branches b ON b.id = st.branch_id
       JOIN subjects s ON s.id = st.subject_id
