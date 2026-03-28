@@ -203,37 +203,28 @@ router.post('/students/import', async (req, res) => {
                     academicYear = Number(year);
                 }
 
-                // Handle branch — create base branch AND section-specific branch
+                // Handle branch — create section-specific branch only
+                // (If no section provided, creates a branch with empty section)
                 let branchCode = branchRaw;
                 if (branchRaw && createMissingBranches) {
-                    const key = branchRaw.toUpperCase();
-                    if (!branchLookup[key]) {
+                    // Create branch with the specified section (or empty if not provided)
+                    const secKey = sectionRaw 
+                        ? `${branchRaw.toUpperCase()}::${sectionRaw.toUpperCase()}`
+                        : branchRaw.toUpperCase();
+                    
+                    if (!branchLookup[secKey]) {
                         try {
                             const newBranch = BranchModel.create({
                                 branchCode: branchRaw,
-                                branchName: branchRaw
+                                branchName: branchRaw,
+                                section: sectionRaw || ''
                             });
-                            branchLookup[key] = newBranch;
-                            result.createdBranches.push(branchRaw);
-                        } catch (_) { /* ignore duplicates */ }
-                    }
-                    // Also create section-specific branch if section is provided
-                    if (sectionRaw) {
-                        const secKey = `${branchRaw.toUpperCase()}::${sectionRaw.toUpperCase()}`;
-                        if (!branchLookup[secKey]) {
-                            try {
-                                const secBranch = BranchModel.create({
-                                    branchCode: branchRaw,
-                                    branchName: branchRaw,
-                                    section: sectionRaw
-                                });
-                                branchLookup[secKey] = secBranch;
-                                result.createdBranches.push(`${branchRaw}-${sectionRaw}`);
-                            } catch (_) {
-                                // May already exist — look it up
-                                const existing = BranchModel.getByCode(branchRaw, sectionRaw);
-                                if (existing) branchLookup[secKey] = existing;
-                            }
+                            branchLookup[secKey] = newBranch;
+                            result.createdBranches.push(sectionRaw ? `${branchRaw}-${sectionRaw}` : branchRaw);
+                        } catch (_) {
+                            // May already exist — look it up
+                            const existing = BranchModel.getByCode(branchRaw, sectionRaw || '');
+                            if (existing) branchLookup[secKey] = existing;
                         }
                     }
                 }
@@ -477,8 +468,9 @@ router.post('/year-subjects/import', async (req, res) => {
             return significant.map(w => w.substring(0, 3).toUpperCase()).join('-');
         };
 
-        // Group mappings by year
+        // Group mappings by year with deduplication tracking
         const mappingsByYear = {};
+        const seenMappings = new Set(); // Track (year, branchId, subjectId) to prevent duplicates
 
         const processSheet = (worksheet) => {
             const startRow = headerRow || 1;
@@ -599,9 +591,17 @@ router.post('/year-subjects/import', async (req, res) => {
 
                 const validType = ['REGULAR', 'PE', 'OE'].includes(subjectType) ? subjectType : 'REGULAR';
                 if (!mappingsByYear[rowYear]) mappingsByYear[rowYear] = [];
-                // Create mapping for EACH section of this branch
+                
+                // Create mapping for ALL sections of this branch
+                // (e.g., if CIC has sections A, B, C, D - create mapping for each)
                 for (const branch of branches) {
-                    mappingsByYear[rowYear].push({ branchId: branch.id, subjectId: subject.id, subjectType: validType });
+                    const mappingKey = `${rowYear}-${branch.id}-${subject.id}`;
+                    
+                    // Only add if this exact (year, branch, subject) combination hasn't been seen
+                    if (!seenMappings.has(mappingKey)) {
+                        seenMappings.add(mappingKey);
+                        mappingsByYear[rowYear].push({ branchId: branch.id, subjectId: subject.id, subjectType: validType });
+                    }
                 }
                 result.imported++;
                 result.yearBreakdown[rowYear] = (result.yearBreakdown[rowYear] || 0) + 1;

@@ -1121,21 +1121,43 @@ function SubjectMappingTab({ allBranches, allSubjects, onError, onSuccess, clear
                     </select>
                 </div>
                 {existingMappings.length > 0 && (() => {
-                    // Group by branch
+                    // Group by branch_code and deduplicate subjects (same subject across different sections)
                     const byBranch = {};
                     for (const m of existingMappings) {
-                        if (!byBranch[m.branch_code]) byBranch[m.branch_code] = { name: m.branch_name, subjects: [] };
-                        byBranch[m.branch_code].subjects.push(m);
+                        if (!byBranch[m.branch_code]) {
+                            byBranch[m.branch_code] = {
+                                name: m.branch_name,
+                                sections: new Set(),
+                                subjects: [],
+                                seenSubjects: new Set() // Track subject_id to avoid duplicates
+                            };
+                        }
+                        if (m.section) byBranch[m.branch_code].sections.add(m.section);
+
+                        // Only add subject if not already seen (deduplication)
+                        if (!byBranch[m.branch_code].seenSubjects.has(m.subject_id)) {
+                            byBranch[m.branch_code].seenSubjects.add(m.subject_id);
+                            byBranch[m.branch_code].subjects.push(m);
+                        }
                     }
+
+                    // Calculate unique subjects count
+                    const uniqueSubjectCount = Object.values(byBranch).reduce((sum, b) => sum + b.subjects.length, 0);
+
                     return (
                         <div>
                             <p style={{ fontSize: 13, color: '#2e7d32', marginBottom: 12 }}>
-                                <strong>Total:</strong> {existingMappings.length} subjects across {Object.keys(byBranch).length} branches
+                                <strong>Total:</strong> {uniqueSubjectCount} unique subjects across {Object.keys(byBranch).length} branches
                             </p>
                             {Object.entries(byBranch).map(([branchCode, info]) => (
                                 <div key={branchCode} style={{ marginBottom: 16 }}>
                                     <h4 style={{ fontSize: 14, marginBottom: 4, borderBottom: '2px solid #1976d2', paddingBottom: 4, color: '#1976d2' }}>
                                         {branchCode} — {info.name}
+                                        {info.sections.size > 0 && (
+                                            <span style={{ fontWeight: 400, fontSize: 11, color: '#888', marginLeft: 6 }}>
+                                                (Sections: {[...info.sections].sort().join(', ')})
+                                            </span>
+                                        )}
                                         <span style={{ fontWeight: 400, fontSize: 12, color: '#666', marginLeft: 8 }}>
                                             ({info.subjects.length} subjects)
                                         </span>

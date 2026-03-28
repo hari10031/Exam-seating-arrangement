@@ -57,7 +57,7 @@ const ConfigurationModel = {
     getYearBranchSubjects(year, branchId = null) {
         const db = getDb();
         let sql = `
-            SELECT ybs.*, b.branch_code, b.branch_name, s.subject_code, s.subject_name
+            SELECT ybs.*, b.branch_code, b.branch_name, b.section, s.subject_code, s.subject_name
             FROM year_branch_subjects ybs
             JOIN branches b ON b.id = ybs.branch_id
             JOIN subjects s ON s.id = ybs.subject_id
@@ -68,7 +68,7 @@ const ConfigurationModel = {
             sql += ' AND ybs.branch_id = ?';
             params.push(branchId);
         }
-        sql += ' ORDER BY b.branch_code, ybs.subject_type, s.subject_code';
+        sql += ' ORDER BY b.branch_code, b.section, ybs.subject_type, s.subject_code';
         return db.prepare(sql).all(...params);
     },
 
