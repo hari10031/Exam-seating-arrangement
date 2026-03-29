@@ -106,7 +106,7 @@ function allocateSeats({ rooms, students, mode, allocationMethod = 'INTERLEAVED'
 
 function allocateSingle(rooms, students) {
     // 1. Total available seats (1 per bench), respecting effective_capacity
-    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r), 0);
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r, 'SINGLE'), 0);
 
     // 2. Group students by subject, sort each group by roll number
     const subjectGroups = groupBySubject(students);
@@ -166,7 +166,7 @@ function allocateSingle(rooms, students) {
 
 function allocateDouble(rooms, students) {
     // 1. Total available seats (2 per bench), respecting effective_capacity
-    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r) * 2, 0);
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r, 'DOUBLE') * 2, 0);
 
     // 2. Group students by subject
     const subjectGroups = groupBySubject(students);
@@ -288,21 +288,26 @@ function allocateDouble(rooms, students) {
 // ═══════════════════════════════════════════════════════════════
 
 function allocateLinearSingle(rooms, students) {
-    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r), 0);
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r, 'SINGLE'), 0);
 
-    // Group by branch+subject for proper elective handling
+    // Group by branch_code::subject (NOT section) so that one elective is completed
+    // across ALL sections (A,B,C,D) before moving to the next elective.
+    // Example: CSE::PE-I (A+B+C+D) → CSE::PE-II (A+B+C+D) → CSIT::PE-I
     const branchSubjectGroups = {};
     for (const s of students) {
-        const section = s.branch_section || '';
-        const branchKey = section ? `${s.branch_code}-${section}` : s.branch_code;
-        const key = `${branchKey}::${s.subject_name || 'NONE'}`;
+        // Use branch_code only (without section) for grouping
+        const key = `${s.branch_code}::${s.subject_name || 'NONE'}`;
         if (!branchSubjectGroups[key]) branchSubjectGroups[key] = [];
         branchSubjectGroups[key].push(s);
     }
 
-    // Sort students within each group by roll number
+    // Sort students within each group by SECTION first, then roll number
+    // This keeps sections together within the same elective
     for (const key of Object.keys(branchSubjectGroups)) {
         branchSubjectGroups[key].sort((a, b) => {
+            const secA = a.branch_section || '';
+            const secB = b.branch_section || '';
+            if (secA !== secB) return secA.localeCompare(secB);
             const ra = parseInt(a.roll_number, 10);
             const rb = parseInt(b.roll_number, 10);
             if (!isNaN(ra) && !isNaN(rb)) return ra - rb;
@@ -404,20 +409,25 @@ function allocateLinearSingle(rooms, students) {
 // ═══════════════════════════════════════════════════════════════
 
 function allocateLinearDouble(rooms, students) {
-    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r) * 2, 0);
+    const totalSeats = rooms.reduce((sum, r) => sum + getEffectiveBenchCount(r, 'DOUBLE') * 2, 0);
 
-    // Group by branch+section+subject so that the same branch with different elective
-    // subjects gets separate queues that can be paired together.
+    // Group by branch_code::subject (NOT section) so that one elective is completed
+    // across ALL sections (A,B,C,D) before moving to the next elective.
+    // Example: CSE::PE-I (A+B+C+D) → CSE::PE-II (A+B+C+D) → CSIT::PE-I
     const branchSubjectGroups = {};
     for (const s of students) {
-        const section = s.branch_section || '';
-        const branchKey = section ? `${s.branch_code}-${section}` : s.branch_code;
-        const key = `${branchKey}::${s.subject_name}`;
+        // Use branch_code only (without section) for grouping
+        const key = `${s.branch_code}::${s.subject_name}`;
         if (!branchSubjectGroups[key]) branchSubjectGroups[key] = [];
         branchSubjectGroups[key].push(s);
     }
+
+    // Sort students within each group by SECTION first, then roll number
     for (const key of Object.keys(branchSubjectGroups)) {
         branchSubjectGroups[key].sort((a, b) => {
+            const secA = a.branch_section || '';
+            const secB = b.branch_section || '';
+            if (secA !== secB) return secA.localeCompare(secB);
             const ra = parseInt(a.roll_number, 10);
             const rb = parseInt(b.roll_number, 10);
             if (!isNaN(ra) && !isNaN(rb)) return ra - rb;
@@ -662,12 +672,22 @@ function roundRobinInterleave(subjectGroups) {
 
 /**
  * Get the effective bench count for a room.
- * Uses effective_capacity if set, otherwise rows * columns.
+ * effective_capacity represents NUMBER OF STUDENTS (not benches).
+ * In SINGLE mode: benches = students (1 student per bench)
+ * In DOUBLE mode: benches = ceil(students / 2) (2 students per bench)
  */
-function getEffectiveBenchCount(room) {
+function getEffectiveBenchCount(room, mode) {
     const totalBenches = room.rows * room.columns;
     if (room.effective_capacity !== null && room.effective_capacity !== undefined) {
-        return Math.min(room.effective_capacity, totalBenches);
+        // effective_capacity is student count, convert to bench count
+        const studentsAllowed = room.effective_capacity;
+        let benchesNeeded;
+        if (mode === 'DOUBLE') {
+            benchesNeeded = Math.ceil(studentsAllowed / 2);
+        } else {
+            benchesNeeded = studentsAllowed; // SINGLE mode: 1 student per bench
+        }
+        return Math.min(benchesNeeded, totalBenches);
     }
     return totalBenches;
 }
@@ -684,7 +704,7 @@ function buildSeatSlots(rooms, mode) {
     const sorted = [...rooms].sort((a, b) => a.room_code.localeCompare(b.room_code));
 
     for (const room of sorted) {
-        const effectiveBenches = getEffectiveBenchCount(room);
+        const effectiveBenches = getEffectiveBenchCount(room, mode);
         let benchCount = 0;
 
         outerLoop:

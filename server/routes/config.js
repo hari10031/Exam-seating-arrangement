@@ -767,28 +767,82 @@ router.post('/electives/import', async (req, res) => {
 
         const result = { imported: 0, skipped: 0, errors: [] };
 
+        // Helper to extract short name from elective subject names
+        // E.g., "Professional Elective – II: Web 3.0" -> "web 3.0"
+        const extractShortName = (subjectName) => {
+            const patterns = [
+                /^(?:PE|Professional Elective|Open Elective)\s*[-–—]\s*(?:I{1,3}|[123])\s*[:：]\s*(.+)$/i,
+                /^(?:PE|Professional Elective|Open Elective)\s*[-–—]\s*(?:I{1,3}|[123])\s*\((.+)\)$/i,
+                /^(?:PE|Professional Elective|Open Elective)\s*[-–—]\s*(?:I{1,3}|[123])\s*(.+)$/i
+            ];
+            for (const pat of patterns) {
+                const match = subjectName.match(pat);
+                if (match) {
+                    return match[1].trim().toLowerCase();
+                }
+            }
+            return subjectName.toLowerCase();
+        };
+
+        // Build lookup tables: by code and by extracted short name
         const subjectLookup = {};
+        const subjectNameLookup = {};
         SubjectModel.getAll().forEach(s => {
             subjectLookup[s.subject_code.toUpperCase()] = s;
+            // Extract short name and add to name lookup
+            const shortName = extractShortName(s.subject_name);
+            // Only add unique short names (first match wins)
+            if (!subjectNameLookup[shortName]) {
+                subjectNameLookup[shortName] = s;
+            }
+            // Also add the full name normalized
+            const fullNorm = s.subject_name.toLowerCase().trim();
+            if (!subjectNameLookup[fullNorm]) {
+                subjectNameLookup[fullNorm] = s;
+            }
         });
 
         const choices = [];
         const typesUsed = new Set();
 
-        const resolveSubject = (subjectCode, rollNumber) => {
-            if (!subjectCode) return null;
-            let subject = subjectLookup[subjectCode.toUpperCase()];
-            if (!subject && createMissing) {
-                try {
-                    subject = SubjectModel.create({ subjectCode, subjectName: subjectCode });
-                    subjectLookup[subjectCode.toUpperCase()] = subject;
-                } catch (_) {
-                    subject = SubjectModel.getByCode(subjectCode);
+        const resolveSubject = (inputValue, rollNumber) => {
+            if (!inputValue) return null;
+            const trimmed = inputValue.trim();
+            const upper = trimmed.toUpperCase();
+            const lower = trimmed.toLowerCase();
+
+            // 1. Try exact match by subject_code
+            let subject = subjectLookup[upper];
+
+            // 2. Try exact match by short name or full name
+            if (!subject) {
+                subject = subjectNameLookup[lower];
+            }
+
+            // 3. Try substring match: find subject whose short name contains input
+            if (!subject) {
+                for (const [shortName, s] of Object.entries(subjectNameLookup)) {
+                    if (shortName.includes(lower) || lower.includes(shortName)) {
+                        subject = s;
+                        break;
+                    }
                 }
             }
+
+            // 4. If still not found and createMissing is enabled, create new subject
+            if (!subject && createMissing) {
+                try {
+                    subject = SubjectModel.create({ subjectCode: trimmed, subjectName: trimmed });
+                    subjectLookup[upper] = subject;
+                    subjectNameLookup[lower] = subject;
+                } catch (_) {
+                    subject = SubjectModel.getByCode(trimmed);
+                }
+            }
+
             if (!subject) {
                 result.skipped++;
-                result.errors.push({ rollNumber, reason: `Unknown subject: ${subjectCode}` });
+                result.errors.push({ rollNumber, reason: `Unknown subject: ${trimmed}` });
             }
             return subject;
         };
@@ -881,7 +935,7 @@ router.get('/electives', (req, res) => {
  * Body: {
  *   fileData: "base64",
  *   year: 2,
- *   columnMapping: { branch: 1, subjectCode: 2, examDate: 3, slot: 4 },
+ *   columnMapping: { branch: 1, subjectCode: 2, subjectName: 3, examDate: 4, slot: 5 },
  *   sheetName: "Sheet1",
  *   headerRow: 1,
  *   createMissing: true
@@ -904,12 +958,17 @@ router.post('/timetable/import', async (req, res) => {
 
         const result = { imported: 0, skipped: 0, errors: [] };
 
-        // Map branch_code → array of all branch rows (one per section)
+        // Map branch_code → base branch (prefer branches WITHOUT section)
+        // This ensures timetable entries use base branch, and session creation
+        // can then split students by all sections from student_master.
         const branchLookup = {};
         BranchModel.getAll().forEach(b => {
             const key = b.branch_code.toUpperCase();
-            if (!branchLookup[key]) branchLookup[key] = [];
-            branchLookup[key].push(b);
+            const hasSection = b.section && String(b.section).trim() !== '';
+            // Prefer base branch (no section); only use sectioned branch if no base exists
+            if (!branchLookup[key] || (!hasSection && branchLookup[key].section)) {
+                branchLookup[key] = b;
+            }
         });
         const subjectLookup = {};
         const subjectNameLookup = {};
@@ -972,23 +1031,26 @@ router.post('/timetable/import', async (req, res) => {
                     examDate = String(examDate).trim();
                 }
 
-                // Resolve branch — get ALL sections for this branch_code
-                let branches = branchLookup[branchRaw.toUpperCase()];
-                if ((!branches || branches.length === 0) && createMissing) {
+                // Resolve branch — get ONE branch per branch_code
+                let branch = branchLookup[branchRaw.toUpperCase()];
+                if (!branch && createMissing) {
                     try {
-                        const newBranch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
-                        branchLookup[branchRaw.toUpperCase()] = [newBranch];
-                        branches = [newBranch];
+                        branch = BranchModel.create({ branchCode: branchRaw, branchName: branchRaw });
+                        branchLookup[branchRaw.toUpperCase()] = branch;
                     } catch (_) {
-                        const existing = BranchModel.getByCode(branchRaw);
-                        if (existing) branches = [existing];
+                        branch = BranchModel.getByCode(branchRaw);
                     }
                 }
-                if (!branches || branches.length === 0) {
+                if (!branch) {
                     result.skipped++;
                     result.errors.push({ subjectCode, reason: `Unknown branch: ${branchRaw}` });
                     return;
                 }
+
+                // Get subject name if column is mapped
+                const subjectNameRaw = columnMapping.subjectName
+                    ? String(row.getCell(columnMapping.subjectName).value || '').trim()
+                    : null;
 
                 // Resolve subject — try exact code, then normalized code (strip dots/spaces/hyphens), then by name, then normalized name
                 let subject = subjectLookup[subjectCode.toUpperCase()]
@@ -997,8 +1059,13 @@ router.post('/timetable/import', async (req, res) => {
                     || subjectNormalizedNameLookup[normalizeName(subjectCode)];
                 if (!subject && createMissing) {
                     try {
-                        subject = SubjectModel.create({ subjectCode, subjectName: subjectCode });
+                        // Use subjectName from Excel if available, otherwise use code as name
+                        const nameForSubject = subjectNameRaw || subjectCode;
+                        subject = SubjectModel.create({ subjectCode, subjectName: nameForSubject });
                         subjectLookup[subjectCode.toUpperCase()] = subject;
+                        if (nameForSubject) {
+                            subjectNameLookup[nameForSubject.toUpperCase()] = subject;
+                        }
                     } catch (_) {
                         subject = SubjectModel.getByCode(subjectCode);
                     }
@@ -1009,19 +1076,17 @@ router.post('/timetable/import', async (req, res) => {
                     return;
                 }
 
-                // Create timetable entry for EACH section of this branch
-                for (const branch of branches) {
-                    entries.push({
-                        year: rowYear,
-                        branchId: branch.id,
-                        subjectId: subject.id,
-                        examDate,
-                        slot,
-                        timeSlot,
-                        semester,
-                        academicYear
-                    });
-                }
+                // Create ONE timetable entry per branch (not per section)
+                entries.push({
+                    year: rowYear,
+                    branchId: branch.id,
+                    subjectId: subject.id,
+                    examDate,
+                    slot,
+                    timeSlot,
+                    semester,
+                    academicYear
+                });
                 result.imported++;
             });
         };

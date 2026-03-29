@@ -483,7 +483,7 @@ const ConfigurationModel = {
 
         // Build query with multiple match conditions
         let sql = `
-            SELECT DISTINCT se.roll_number, sm.student_name
+            SELECT DISTINCT se.roll_number, sm.student_name, COALESCE(sm.section, '') as section
             FROM student_electives se
             LEFT JOIN student_master sm ON sm.roll_number = se.roll_number
             JOIN subjects s ON s.id = se.subject_id
@@ -546,9 +546,11 @@ const ConfigurationModel = {
         `;
         const params = [examDate, year];
 
+        // slot from session might be a time (11:30-12:40) or FN/AN
+        // Match against both slot (FN/AN) and time_slot (11:30-12:40)
         if (slot) {
-            sql += ' AND slot = ?';
-            params.push(slot);
+            sql += ' AND (slot = ? OR time_slot = ?)';
+            params.push(slot, slot);
         }
 
         sql += ' LIMIT 1';

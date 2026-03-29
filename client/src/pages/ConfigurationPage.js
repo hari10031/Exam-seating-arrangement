@@ -1808,6 +1808,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                     semester: mapping.semester ? (row[mapping.semester] || '') : '',
                     branch: row[mapping.branch] || '',
                     subjectCode: row[mapping.subjectCode] || '',
+                    subjectName: mapping.subjectName ? (row[mapping.subjectName] || '') : '',
                     examDate: row[mapping.examDate] || '',
                     slot: mapping.slot ? (row[mapping.slot] || '') : '',
                     time: mapping.time ? (row[mapping.time] || '') : ''
@@ -1829,6 +1830,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
             const columnMapping = {
                 branch: mapping.branch,
                 subjectCode: mapping.subjectCode,
+                subjectName: mapping.subjectName || null,
                 examDate: mapping.examDate,
                 slot: mapping.slot || null,
                 time: mapping.time || null,
@@ -1862,7 +1864,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
             <div className="card">
                 <h3>Import Exam Timetable (XLSX)</h3>
                 <p style={{ fontSize: 13, color: '#666', marginBottom: 16 }}>
-                    Upload an XLSX with columns: Branch, Subject Code, Exam Date, Slot (FN/AN).
+                    Upload an XLSX with columns: Branch, Subject Code, Subject Name, Exam Date, Slot (FN/AN).
                     You can also map Academic Year and Semester columns from XLSX.
                 </p>
 
@@ -1939,6 +1941,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                                         { key: 'semester', label: 'Semester (from data)' },
                                         { key: 'branch', label: 'Branch *' },
                                         { key: 'subjectCode', label: 'Subject Code *' },
+                                        { key: 'subjectName', label: 'Subject Name' },
                                         { key: 'examDate', label: 'Exam Date *' },
                                         { key: 'slot', label: 'Slot (FN/AN)' },
                                         { key: 'time', label: 'Time' }
@@ -1949,7 +1952,7 @@ function TimetableTab({ allBranches, allSubjects, onError, onSuccess, clearMessa
                                                 value={mapping[field.key] || ''}
                                                 onChange={e => setMapping(prev => ({ ...prev, [field.key]: e.target.value ? Number(e.target.value) : null }))}
                                             >
-                                                <option value="">{field.key === 'year' || field.key === 'semester' || field.key === 'academicYear' ? '-- Optional --' : '-- Select --'}</option>
+                                                <option value="">{['year', 'semester', 'academicYear', 'subjectName'].includes(field.key) ? '-- Optional --' : '-- Select --'}</option>
                                                 {currentSheet.headers.map(h => (
                                                     <option key={h.col} value={h.col}>Col {h.col}: {h.name}</option>
                                                 ))}

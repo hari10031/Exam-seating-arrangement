@@ -117,41 +117,61 @@ router.post('/', (req, res) => {
                     };
 
                     // Auto-populate students from student_master
-                    // For electives, fetch branch-scoped elective students.
+                    // For electives, fetch branch-scoped elective students (all sections).
                     // For regular subjects, use section-aware student lists.
                     for (const e of canonicalEntries) {
                         const isElective = e.subject_type === 'PE' || e.subject_type === 'OE';
                         if (isElective) {
-                            addMapping(e.branch_id, e.subject_id);
-
+                            // Get elective students for ALL sections of the branch
                             let students = ConfigurationModel.getRollNumbersForElective(
                                 Number(year),
                                 e.subject_id,
                                 e.branch_code,
-                                e.branch_section || null
+                                null  // Don't filter by section - get all sections
                             );
 
-                            // Track electives with no students found (don't fallback to ALL branch students)
+                            // Track electives with no students found
                             if (students.length === 0) {
                                 electiveWarnings.push({
-                                    branch: e.branch_code + (e.branch_section ? `-${e.branch_section}` : ''),
+                                    branch: e.branch_code,
                                     subject: e.subject_name || e.subject_code,
                                     subjectId: e.subject_id
                                 });
                             }
 
-                            addStudentRolls(e.branch_id, e.subject_id, students);
-                        } else if (e.branch_section) {
-                            // Timetable entry is already section-specific.
-                            addMapping(e.branch_id, e.subject_id);
-                            const students = ConfigurationModel.getRollNumbers(
-                                Number(year),
-                                e.branch_code,
-                                e.branch_section
-                            );
-                            addStudentRolls(e.branch_id, e.subject_id, students);
+                            // Group elective students by section and create mappings for each
+                            const sectionGroups = {};
+                            for (const s of students) {
+                                const sec = s.section || '';
+                                if (!sectionGroups[sec]) sectionGroups[sec] = [];
+                                sectionGroups[sec].push(s);
+                            }
+
+                            const hasSections = Object.keys(sectionGroups).some(sec => sec !== '');
+                            for (const [section, sectionStudents] of Object.entries(sectionGroups)) {
+                                let branchId = e.branch_id;
+                                if (section) {
+                                    // Find or create section-specific branch
+                                    let secBranch = BranchModel.getByCode(e.branch_code, section);
+                                    if (!secBranch) {
+                                        secBranch = BranchModel.create({
+                                            branchCode: e.branch_code,
+                                            branchName: e.branch_code,
+                                            section: section
+                                        });
+                                    }
+                                    branchId = secBranch.id;
+                                }
+                                addMapping(branchId, e.subject_id);
+                                addStudentRolls(branchId, e.subject_id, sectionStudents);
+                            }
+                            if (!hasSections) {
+                                addMapping(e.branch_id, e.subject_id);
+                            }
                         } else {
-                            // Base branch timetable row: split students by section from student_master.
+                            // Regular subject: ALWAYS split students by section from student_master
+                            // regardless of what section the timetable entry points to.
+                            // This ensures all sections (A, B, C, D) are included.
                             const sectionGroups = ConfigurationModel.getRollNumbersBySection(Number(year), e.branch_code);
                             const hasSections = sectionGroups.some(sg => sg.section);
                             for (const sg of sectionGroups) {

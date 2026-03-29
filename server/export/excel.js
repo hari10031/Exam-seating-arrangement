@@ -182,9 +182,9 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
     const cieType = sessionInfo.cieType || 'CIE-I'; // Dynamic CIE type
     const academicYear = sessionInfo.academicYear || ''; // From timetable
 
-    // Roman numeral semester for branch labels (e.g., "VI" for semester 6)
+    // Roman numeral semester for branch labels (e.g., "VI Sem" for semester 6)
     const romanNumerals = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 7: 'VII', 8: 'VIII' };
-    const semRoman = sessionInfo.semester ? romanNumerals[Number(sessionInfo.semester)] || sessionInfo.semester : '';
+    const semRoman = sessionInfo.semester ? (romanNumerals[Number(sessionInfo.semester)] || sessionInfo.semester) + ' Sem' : '';
 
     // Thin border helper
     const thinBorder = {
@@ -287,7 +287,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         const infoStart = row;
         ws.getCell(row, 1).value = 'Subject';
         ws.getCell(row, 2).value = subjectName;
-        ws.getCell(row, 3).value = `Branch: BE (${branchLabel})${semRoman ? ' ' + semRoman : ''}`;
+        ws.getCell(row, 3).value = `Branch: BE (${branchLabel})${semRoman ? ' - ' + semRoman : ''}`;
         // ws.getCell(row, 4).value = `BE (${branchLabel})`;
         // ws.getCell(row, 5).value = 'Total Students';
         ws.getCell(row, 4).value = `Total Students: `;
@@ -478,7 +478,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         const ICOLS = 6;
         const infoStart = row;
         ws.getCell(row, 1).value = 'Branch';
-        ws.getCell(row, 2).value = `BE (${branchLabel})${semRoman ? ' ' + semRoman : ''}`;
+        ws.getCell(row, 2).value = `BE (${branchLabel})${semRoman ? ' - ' + semRoman : ''}`;
         ws.getCell(row, 3).value = 'Total Students';
         ws.getCell(row, 4).value = totalStudents;
         // ws.getCell(row, 5).value = '';
@@ -664,7 +664,7 @@ async function generateExcel({ sessionName, allocations, roomGrids, report, room
         row++;
         const infoStart = row;
         ws.getCell(row, 1).value = 'Branch';
-        ws.getCell(row, 2).value = `BE (${branchLabel})${semRoman ? ' ' + semRoman : ''}`;
+        ws.getCell(row, 2).value = `BE (${branchLabel})${semRoman ? ' - ' + semRoman : ''}`;
         ws.getCell(row, 3).value = '';
         ws.getCell(row, 4).value = '';
         ws.getCell(row, 5).value = 'Total Students';
